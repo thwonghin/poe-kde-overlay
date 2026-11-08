@@ -26,6 +26,81 @@ use crate::logger::Logger;
 const KEY_LEFTCTRL: u32 = 29;
 const KEY_C: u32 = 46;
 
+/// Renderer key name (`ipc/KeyToCode.ts`'s vocabulary, as used in a
+/// `shortcut` string like "Ctrl + D") → evdev keycode.
+fn key_to_evdev(key: &str) -> Option<u32> {
+    const LETTERS: &[u32] = &[
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47,
+        17, 45, 21, 44,
+    ];
+    let code = match key {
+        "Ctrl" => 29,
+        "Shift" => 42,
+        "Alt" => 56,
+        "Backspace" => 14,
+        "Tab" => 15,
+        "Enter" => 28,
+        "CapsLock" => 58,
+        "Escape" => 1,
+        "Space" => 57,
+        "PageUp" => 104,
+        "PageDown" => 109,
+        "End" => 107,
+        "Home" => 102,
+        "ArrowLeft" => 105,
+        "ArrowUp" => 103,
+        "ArrowRight" => 106,
+        "ArrowDown" => 108,
+        "Insert" => 110,
+        "Delete" => 111,
+        "0" => 11,
+        "Numpad0" => 82,
+        "Numpad1" => 79,
+        "Numpad2" => 80,
+        "Numpad3" => 81,
+        "Numpad4" => 75,
+        "Numpad5" => 76,
+        "Numpad6" => 77,
+        "Numpad7" => 71,
+        "Numpad8" => 72,
+        "Numpad9" => 73,
+        "NumpadMultiply" => 55,
+        "NumpadAdd" => 78,
+        "NumpadSubtract" => 74,
+        "NumpadDecimal" => 83,
+        "NumpadDivide" => 98,
+        "F11" => 87,
+        "F12" => 88,
+        "Semicolon" => 39,
+        "Equal" => 13,
+        "Comma" => 51,
+        "Minus" => 12,
+        "Period" => 52,
+        "Slash" => 53,
+        "Backquote" => 41,
+        "BracketLeft" => 26,
+        "Backslash" => 43,
+        "BracketRight" => 27,
+        "Quote" => 40,
+        _ => {
+            let mut chars = key.chars();
+            return match (chars.next(), chars.next()) {
+                (Some(c @ 'A'..='Z'), None) => Some(LETTERS[(c as u8 - b'A') as usize]),
+                // KEY_1..KEY_9 = 2..10
+                (Some(c @ '1'..='9'), None) => Some((c as u8 - b'1') as u32 + 2),
+                // F1..F10 = 59..68, F13..F24 = 183..194
+                (Some('F'), Some(_)) => match key[1..].parse::<u32>().ok()? {
+                    n @ 1..=10 => Some(58 + n),
+                    n @ 13..=24 => Some(170 + n),
+                    _ => None,
+                },
+                _ => None,
+            };
+        }
+    };
+    Some(code)
+}
+
 // Ported from HostClipboard.ts's POLL_DELAY/POLL_LIMIT: after pressing
 // Ctrl+C, poll the clipboard every 48ms rather than assuming any single
 // fixed wait is always long enough for the game to update it, and give up
@@ -505,6 +580,23 @@ impl RemoteInput {
         ]);
     }
 
+    /// Port of Shortcuts.ts's key-up toggle before acting on a hotkey: the
+    /// user is often still physically holding the shortcut (e.g. the `D` of
+    /// Ctrl+D) when we inject Ctrl+C, and PoE then sees Ctrl+D+C and
+    /// sometimes ignores it (observed live as "clipboard poll timed out").
+    /// ponytail: uses the renderer's configured `shortcut`; if the user
+    /// rebound the hotkey in KDE System Settings these may be the wrong keys
+    /// (stray key-ups are harmless). Upgrade path: track the portal's
+    /// bound `trigger_description` instead.
+    pub fn release_shortcut_keys(&self, shortcut: &str) {
+        let keys: Vec<_> = shortcut
+            .rsplit(" + ")
+            .filter_map(key_to_evdev)
+            .map(|code| (code, ei::keyboard::KeyState::Released))
+            .collect();
+        self.press_keys(&keys);
+    }
+
     fn press_keys(&self, keys: &[(u32, ei::keyboard::KeyState)]) {
         let handle = self.keyboard.borrow();
         let Some(handle) = handle.as_ref() else {
@@ -526,6 +618,20 @@ impl RemoteInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_to_evdev_matches_input_event_codes() {
+        let cases = [
+            ("A", 30), ("C", 46), ("D", 32), ("Z", 44), ("1", 2), ("9", 10), ("0", 11),
+            ("F1", 59), ("F10", 68), ("F11", 87), ("F13", 183), ("F24", 194),
+            ("Ctrl", 29), ("Space", 57), ("Numpad0", 82),
+        ];
+        for (key, code) in cases {
+            assert_eq!(key_to_evdev(key), Some(code), "{key}");
+        }
+        assert_eq!(key_to_evdev("F25"), None);
+        assert_eq!(key_to_evdev(""), None);
+    }
 
     #[test]
     fn looks_like_item_text_matches_every_language_signature() {

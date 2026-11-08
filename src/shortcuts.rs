@@ -354,6 +354,7 @@ async fn run(
                     active_window,
                     &target,
                     focus_overlay,
+                    &action.shortcut,
                     restore_clipboard,
                 )
                 .await
@@ -390,6 +391,7 @@ async fn price_check(
     active_window: &Rc<RefCell<Option<WindowEvent>>>,
     target: &str,
     focus_overlay: bool,
+    shortcut: &str,
     restore_clipboard: &Rc<Cell<bool>>,
 ) {
     println!(
@@ -479,6 +481,7 @@ async fn price_check(
         if cursor.is_some_and(|(_, _, poe_active)| !poe_active) {
             return None;
         }
+        remote.release_shortcut_keys(shortcut);
         Some((cursor, remote.copy_item_text(restore_clipboard.get()).await))
     });
     let timeout = std::pin::pin!(glib::timeout_future(PRICE_CHECK_TIMEOUT));

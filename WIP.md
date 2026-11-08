@@ -13,7 +13,8 @@ resetting overlay state when PoE regains OS focus, and a tray icon (via
 `isOverlay`/`wasUsedRecently` `EventBus` fix that shipped alongside it),
 `trigger-event` hotkeys (stopwatch/delve grid), the `overlay-attached`
 "overlay ready" toast, honoring the `windowTitle` setting, and gating
-toggle-overlay activation on PoE focus —
+toggle-overlay activation on PoE focus, and releasing the hotkey's own
+keys before injecting Ctrl+C —
 have been removed from this list to keep it focused on what's actually
 still open. See git history for how each landed; the reasoning behind
 non-obvious decisions (e.g. why hotkeys are now configured in KDE System
@@ -46,9 +47,9 @@ clipboard-save/restore. `remote_input.rs::press_keys` is already a generic
 keys), and the clipboard-write wrapper these sequences need
 (`RemoteInput::write_clipboard_text`, via `ashpd`'s `Clipboard` portal's
 `set_selection`/`selection_write`/`selection_write_done`) already exists,
-built for the clipboard-restore work. Remaining work is just evdev keycode
-constants for the extra keys and a generic multi-key-tap helper — no new
-portal capability needed. The same `stashSearch` helper also backs
+built for the clipboard-restore work, and `remote_input.rs::key_to_evdev`
+already maps every renderer key name to an evdev keycode. Remaining work is
+just a generic multi-key-tap helper — no new portal capability needed. The same `stashSearch` helper also backs
 `CLIENT->MAIN::user-action {action:"stash-search"}` (the stash-search
 widget's click path, `WidgetStashSearch.vue`), which `server.rs` currently
 ignores — wire both when this lands.
@@ -128,7 +129,7 @@ separate, sizeable feature — would need a file watcher on the log path
   synthesize a full Ctrl+C, matching real APT's own `keepModKeys:false` code
   path.
 
-## 7. Small differences: proxy cookies, single-instance lock, hotkey key release
+## 7. Small differences: proxy cookies, single-instance lock
 
 Neither looks urgent; noting them so they don't get re-discovered from
 scratch later.
@@ -159,20 +160,10 @@ scratch later.
   path), but a one-time `flock`-style lock file (e.g. under
   `xdg::data_dir()`) would close it cheaply if it ever bites someone.
 
-- **Hotkey keys aren't released before injecting Ctrl+C.** Real
-  `Shortcuts.ts` toggles every key of the triggering shortcut `up` before
-  `pressKeysToCopyItemText`. `shortcuts.rs::price_check` doesn't, so if the
-  user is still physically holding e.g. `D` of Ctrl+D, PoE sees Ctrl+D+C
-  and occasionally ignores it — observed live as `clipboard poll timed
-  out` while hovering an item. Fix shape: inject `Released` for the
-  configured shortcut's keys via `remote_input.rs::press_keys` first (needs
-  a key-name → evdev keycode table). Caveat: the config's `shortcut` string
-  may not match what the user rebound in KDE.
-
 ## Suggested order if picked back up
 
-1. §2 (paste-in-chat/stash-search hotkey actions) — needs new evdev keycode
-   constants and a generic multi-tap helper; the clipboard-write wrapper it
+1. §2 (paste-in-chat/stash-search hotkey actions) — needs a generic
+   multi-tap helper (`key_to_evdev` covers the keycodes); the clipboard-write wrapper it
    also needs already exists (`RemoteInput::write_clipboard_text`) and can
    be reused as-is.
 2. §3/§4 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
@@ -182,9 +173,8 @@ scratch later.
    approach.
 3. §5 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
-4. §7 — the hotkey key-release item has a real (intermittent) symptom and
-   is small; proxy cookies and the single-instance lock have none, pick up
-   opportunistically.
+4. §7 — proxy cookies and the single-instance lock have no confirmed
+   symptom; pick up opportunistically.
 
 (§1, stash scroll-wheel navigation, is deliberately left off this list —
 needs real window-bounds tracking plus scroll-event capture we don't have
