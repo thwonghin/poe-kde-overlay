@@ -13,8 +13,8 @@ resetting overlay state when PoE regains OS focus, and a tray icon (via
 `isOverlay`/`wasUsedRecently` `EventBus` fix that shipped alongside it),
 `trigger-event` hotkeys (stopwatch/delve grid), the `overlay-attached`
 "overlay ready" toast, honoring the `windowTitle` setting, and gating
-toggle-overlay activation on PoE focus, and releasing the hotkey's own
-keys before injecting Ctrl+C —
+toggle-overlay activation on PoE focus, releasing the hotkey's own
+keys before injecting Ctrl+C, and Alt-hold-to-hide (`overlay_visibility.rs`) —
 have been removed from this list to keep it focused on what's actually
 still open. See git history for how each landed; the reasoning behind
 non-obvious decisions (e.g. why hotkeys are now configured in KDE System
@@ -66,9 +66,10 @@ threshold.
 
 We: only the distance-based auto-close is ported (`spawn_auto_close` in
 `shortcuts.rs`); hovering back into the popup doesn't re-activate anything,
-and there's no hold-to-pin since we don't have live modifier-key state
-outside of what `remote_input.rs`'s EIS events happen to report for our own
-injected keys (not the user's real keyboard).
+and there's no hold-to-pin. Hold-to-pin is no longer blocked: the EIS
+keyboard's `KeyboardModifiers` events turned out to carry the seat's real
+modifier state (`overlay_visibility.rs` already uses it for Alt-hold-hide),
+so `holdKey` can be read the same way.
 
 Real fix shape: we already receive `OVERLAY->MAIN::track-area` payloads
 nowhere (no listener) — would need a live cursor-position stream (not the
@@ -76,28 +77,14 @@ current one-shot KWin query-per-poll) to react promptly, which is a bigger
 lift than it sounds given our cursor position only comes from on-demand KWin
 scripting round-trips.
 
-## 4. No Alt-hold-to-hide-overlay (`OverlayVisibility.ts`)
+## 4. No `logKeys` debug logging
 
-Real: holding Alt (no other modifiers) makes the whole overlay invisible
-after 85ms (if currently interactable) or 275ms (if not) — lets you glance at
-the game without fully closing widgets. Releasing Alt or moving the mouse
-without Alt held restores visibility. We don't implement this at all — no
-`MAIN->OVERLAY::visibility` event is ever sent from our side.
-
-Needs real-time modifier-key state (same missing piece as §3's hold-to-pin) —
-`remote_input.rs` currently only sees modifier events tied to *our own*
-injected key presses, not a live feed of the user's actual keyboard, since
-EIS is a Sender-only context for us (see `remote_input.rs` doc comments).
-Getting a live modifier-key feed would likely need a second EIS/portal
-capability we haven't set up (or KWin D-Bus scripting's own key-event hooks,
-unverified whether that's exposed).
-
-Same root limitation blocks a smaller, separate real feature: `Shortcuts.ts`
-also has a `logKeys` config flag (off some renderer Settings toggle) that,
+`Shortcuts.ts` has a `logKeys` config flag (a renderer Settings toggle) that,
 when on, logs every raw keydown/keyup and which action type fired to the
 Log tab — a live debugging aid for hotkey issues. `host_config.rs` doesn't
-parse `logKeys` at all; even if it did, we have nothing to log from, since we
-never observe the user's real keyboard either.
+parse `logKeys` at all, and we'd have only modifier transitions to log (the
+EIS `KeyboardModifiers` feed `overlay_visibility.rs` uses), not real
+keydown/keyup events.
 
 ## 5. No game-log-driven features (`GameLogWatcher.ts`)
 
@@ -124,10 +111,9 @@ separate, sizeable feature — would need a file watcher on the log path
   anyway. Close to dead code in the real app too now; not worth porting.
 - **`keepModKeys` config field** — only matters for deciding whether to
   reuse a still-physically-held modifier key vs. synthesizing the whole
-  combo fresh; moot for us since we can't observe the user's physical key
-  state either way (same root limitation as §3/§4) and we already always
-  synthesize a full Ctrl+C, matching real APT's own `keepModKeys:false` code
-  path.
+  combo fresh; we always synthesize a full Ctrl+C, matching real APT's own
+  `keepModKeys:false` code path. Portable now that the EIS modifier feed
+  exists (see `overlay_visibility.rs`), but no known reason to.
 
 ## 7. Small differences: proxy cookies, single-instance lock
 
@@ -166,11 +152,9 @@ scratch later.
    multi-tap helper (`key_to_evdev` covers the keycodes); the clipboard-write wrapper it
    also needs already exists (`RemoteInput::write_clipboard_text`) and can
    be reused as-is.
-2. §3/§4 (hover-to-interact, hold-to-pin, Alt-hold-hide, `logKeys` debug
-   view) — blocked on having a live modifier-key/cursor stream we don't
-   currently have; needs its own spike to figure out whether KWin scripting
-   or another portal capability can provide one before committing to an
-   approach.
+2. §3 (hover-to-interact, hold-to-pin) — hold-to-pin can use the EIS
+   modifier feed; hover-to-interact is still blocked on a live cursor
+   stream. §4 (`logKeys`) is low value with only modifier transitions to log.
 3. §5 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
 4. §7 — proxy cookies and the single-instance lock have no confirmed

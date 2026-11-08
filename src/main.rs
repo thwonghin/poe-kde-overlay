@@ -2,6 +2,7 @@ mod config_store;
 mod host_config;
 mod kwin_tracker;
 mod logger;
+mod overlay_visibility;
 mod proxy;
 mod remote_input;
 mod server;
@@ -488,6 +489,8 @@ fn build_ui(app: &Application) {
         let restore_clipboard_rx = backend.restore_clipboard_rx.clone();
         let price_check_open = price_check_open.clone();
         let price_check_locked = price_check_locked.clone();
+        let visibility =
+            overlay_visibility::OverlayVisibility::new(events.clone(), click_through.clone());
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -502,7 +505,11 @@ fn build_ui(app: &Application) {
                 return;
             }
 
-            match remote_input::RemoteInput::setup(logger.clone()).await {
+            match remote_input::RemoteInput::setup(logger.clone(), move |depressed| {
+                visibility.on_modifiers(depressed)
+            })
+            .await
+            {
                 Ok(ri) => {
                     remote_input.replace(Some(ri));
                 }

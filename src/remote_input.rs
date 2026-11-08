@@ -191,7 +191,12 @@ pub struct RemoteInput {
 }
 
 impl RemoteInput {
-    pub async fn setup(logger: Arc<Logger>) -> ashpd::Result<Self> {
+    /// `on_modifiers` receives the seat's depressed-modifier mask on every
+    /// change (see overlay_visibility.rs).
+    pub async fn setup(
+        logger: Arc<Logger>,
+        on_modifiers: impl Fn(u32) + 'static,
+    ) -> ashpd::Result<Self> {
         let proxy = RemoteDesktop::new().await?;
         let session = proxy.create_session(CreateSessionOptions::default()).await?;
 
@@ -271,6 +276,7 @@ impl RemoteInput {
                                 println!("[remote_input] device added without keyboard interface");
                             }
                         }
+                        EiEvent::KeyboardModifiers(mods) => on_modifiers(mods.depressed),
                         EiEvent::DeviceResumed(resumed) => {
                             resumed.device.device().start_emulating(0, 0);
                             let _ = event_loop_context.flush();
