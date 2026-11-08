@@ -1,3 +1,6 @@
 [submodule "vendor/awakened-poe-trade"]
 	path = vendor/awakened-poe-trade
 	url = https://github.com/SnosMe/awakened-poe-trade.git
+[submodule "vendor/exiled-exchange-2"]
+	path = vendor/exiled-exchange-2
+	url = https://github.com/kvan7/Exiled-Exchange-2

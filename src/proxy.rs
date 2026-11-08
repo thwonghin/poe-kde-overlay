@@ -5,8 +5,9 @@ use std::sync::Arc;
 use crate::logger::Logger;
 use crate::server::{write_response, write_response_with_headers};
 
-// Same allowlist as main/src/proxy.ts — this is how the renderer reaches
-// poe.ninja/trade-site data without a CORS-related dead end.
+// Both renderers' main/src/proxy.ts allowlists combined (kept in sync by
+// the `proxy_hosts_match_both_vendors` test) — this is how the renderers
+// reach poe.ninja/trade-site data without a CORS-related dead end.
 const PROXY_HOSTS: &[&str] = &[
     "www.pathofexile.com",
     "ru.pathofexile.com",
@@ -14,9 +15,21 @@ const PROXY_HOSTS: &[&str] = &[
     "poe.kakaogames.com",
     "poe.ninja",
     "www.poeprices.info",
+    // poe2 only: its localized trade realms and item-drop data.
+    "jp.pathofexile.com",
+    "de.pathofexile.com",
+    "es.pathofexile.com",
+    "br.pathofexile.com",
+    "fr.pathofexile.com",
+    "api.exiledexchange2.dev",
 ];
 
-const STRIPPED_REQUEST_HEADERS: &[&str] = &["host", "origin", "content-length", "user-agent"];
+// accept-encoding too: the body goes back to the renderer without its
+// content-encoding header (Electron's net.request also hands proxy.ts a
+// decoded body), so the browser's "br, zstd" reached poe.ninja and EE2's
+// api and the renderer got raw compressed bytes. Dropped, ureq asks only
+// for what it decodes itself.
+const STRIPPED_REQUEST_HEADERS: &[&str] = &["host", "origin", "content-length", "user-agent", "accept-encoding"];
 
 // Overridden rather than forwarded: our WebView's own User-Agent has
 // "Electron/32.0.0" tacked on purely as a local trick to satisfy the
@@ -127,9 +140,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn proxy_hosts_match_both_vendors() {
+        let upstream: std::collections::BTreeSet<String> = crate::game::vendor_sources("main/src/proxy.ts")
+            .iter()
+            .flat_map(|source| crate::game::ts_string_values(source, "host"))
+            .collect();
+        let ours: std::collections::BTreeSet<String> = PROXY_HOSTS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(ours, upstream, "PROXY_HOSTS out of sync with upstream proxy.ts");
+    }
+
+    #[test]
     fn forwards_only_non_identifying_headers() {
         let headers: HashMap<String, String> = [
-            "host", "origin", "content-length", "user-agent", "sec-fetch-mode", "accept", "cookie",
+            "host", "origin", "content-length", "user-agent", "accept-encoding", "sec-fetch-mode", "accept", "cookie",
         ]
         .iter()
         .map(|k| (k.to_string(), "v".to_string()))

@@ -9,17 +9,21 @@ const HISTORY_LIMIT: usize = 256 * 1024;
 // Not actually "remote" (matching the real app's RemoteLogger.ts naming) —
 // just an in-memory buffer new WS clients get replayed on connect, plus a
 // live MAIN->CLIENT::log-entry broadcast to whoever's already connected.
+// One logger for the whole host, attached to every game's bus: host-level
+// errors (portal, input) aren't specific to either game.
+#[derive(Default)]
 pub struct Logger {
     history: Mutex<String>,
-    events: Arc<EventBus>,
+    buses: Mutex<Vec<Arc<EventBus>>>,
 }
 
 impl Logger {
-    pub fn new(events: Arc<EventBus>) -> Self {
-        Self {
-            history: Mutex::new(String::new()),
-            events,
-        }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn attach(&self, events: Arc<EventBus>) {
+        self.buses.lock().unwrap().push(events);
     }
 
     pub fn history(&self) -> String {
@@ -45,7 +49,11 @@ impl Logger {
                 history.drain(..cut);
             }
         }
-        self.events.broadcast(&MainEvent::LogEntry { message: line });
+        let event = MainEvent::LogEntry { message: line };
+        let buses = self.buses.lock().unwrap().clone();
+        for bus in buses {
+            bus.broadcast(&event);
+        }
     }
 
     /// stderr + the in-app Log tab.
@@ -61,7 +69,7 @@ mod tests {
 
     #[test]
     fn history_is_capped_at_a_line_boundary() {
-        let logger = Logger::new(Arc::new(EventBus::new().0));
+        let logger = Logger::new();
         let line = "x".repeat(1000);
         for _ in 0..300 {
             logger.write(&line);

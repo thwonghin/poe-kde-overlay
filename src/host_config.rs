@@ -391,7 +391,7 @@ mod tests {
     use super::*;
 
     fn test_logger() -> Arc<Logger> {
-        Arc::new(Logger::new(Arc::new(crate::server::EventBus::new().0)))
+        Arc::new(Logger::new())
     }
 
     #[test]

@@ -68,7 +68,7 @@ impl OverlayVisibility {
 
     fn set_visible(&self, visible: bool) {
         self.visible.set(visible);
-        self.overlay.events.broadcast(&MainEvent::Visibility { is_visible: visible });
+        self.overlay.events().broadcast(&MainEvent::Visibility { is_visible: visible });
     }
 }
 

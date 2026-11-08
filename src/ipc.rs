@@ -1,7 +1,8 @@
-//! `vendor/awakened-poe-trade/ipc/types.ts`'s events as Rust types: every
+//! Both renderers' `ipc/types.ts` events (vendor/awakened-poe-trade for
+//! poe1, vendor/exiled-exchange-2 for poe2) as Rust types: every
 //! WebSocket message in either direction goes through these. `cargo test`
 //! exports them with ts-rs and has `tsc` check them against upstream's own
-//! `IpcEvent` (tests/ipc_contract.ts), so an upstream rename, type change,
+//! `IpcEvent` (tests/ipc_contract_poe{1,2}.ts), so an upstream rename, type change,
 //! new required field or new client event fails the build's tests.
 //!
 //! Structs only carry the fields we use; the check makes sure those exist
@@ -28,6 +29,15 @@ pub enum ClientEvent {
     UserAction(UserAction),
     #[serde(rename = "CLIENT->MAIN::save-config", rename_all = "camelCase")]
     SaveConfig { contents: String, is_temporary: bool },
+    // poe2 (EE2) only, all ignored: render-state drives its opt-in
+    // hideOverlayOnBlur; write-data/re-parse-log are its item library and
+    // Client.txt re-parse, and we have no game-log watcher for either game.
+    #[serde(rename = "OVERLAY->MAIN::render-state")]
+    RenderState(#[ts(type = "unknown")] serde::de::IgnoredAny),
+    #[serde(rename = "CLIENT->MAIN::write-data")]
+    WriteData(#[ts(type = "unknown")] serde::de::IgnoredAny),
+    #[serde(rename = "CLIENT->MAIN::re-parse-log")]
+    ReparseLog,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -132,8 +142,8 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Exports the types next to tests/ipc_contract.ts and runs the
-    /// renderer's own `tsc` on it.
+    /// Exports the types next to tests/ipc_contract_poe{1,2}.ts and runs
+    /// each renderer's own `tsc` on its contract.
     #[test]
     fn rust_ipc_types_match_upstream_typescript() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -144,19 +154,24 @@ mod tests {
         MainEvent::export_all(&config).unwrap();
         HostState::export_all(&config).unwrap();
 
-        let tsc = root.join("vendor/awakened-poe-trade/renderer/node_modules/.bin/tsc");
-        assert!(tsc.exists(), "{} missing: run ./scripts/build-renderer.sh", tsc.display());
-        let result = std::process::Command::new(&tsc)
-            .current_dir(root)
-            .args(["--noEmit", "--strict", "--target", "es2022", "--module", "esnext"])
-            .args(["--moduleResolution", "bundler", "tests/ipc_contract.ts"])
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "tsc rejected the Rust IPC types:\n{}",
-            String::from_utf8_lossy(&result.stdout)
-        );
+        for (vendor, contract) in [
+            ("awakened-poe-trade", "tests/ipc_contract_poe1.ts"),
+            ("exiled-exchange-2", "tests/ipc_contract_poe2.ts"),
+        ] {
+            let tsc = root.join(format!("vendor/{vendor}/renderer/node_modules/.bin/tsc"));
+            assert!(tsc.exists(), "{} missing: run ./scripts/build-renderer.sh", tsc.display());
+            let result = std::process::Command::new(&tsc)
+                .current_dir(root)
+                .args(["--noEmit", "--strict", "--target", "es2022", "--module", "esnext"])
+                .args(["--moduleResolution", "bundler", contract])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "tsc rejected the Rust IPC types ({contract}):\n{}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
     }
 
     #[test]

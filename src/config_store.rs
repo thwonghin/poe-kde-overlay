@@ -11,8 +11,8 @@ pub struct ConfigStore {
     path: Mutex<std::path::PathBuf>,
 }
 
-pub fn config_path() -> std::path::PathBuf {
-    crate::xdg::data_dir().join("apt-kwin-overlay/config.json")
+pub fn config_path(game: crate::game::Game) -> std::path::PathBuf {
+    game.data_dir().join("config.json")
 }
 
 impl ConfigStore {
@@ -52,7 +52,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("config.json");
         let store = ConfigStore::new(path.clone());
-        let logger = Arc::new(Logger::new(Arc::new(crate::server::EventBus::new().0)));
+        let logger = Arc::new(Logger::new());
 
         store.save("real", false, &logger);
         assert_eq!(store.load().as_deref(), Some("real"));

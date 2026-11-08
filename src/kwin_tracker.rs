@@ -3,54 +3,71 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use zbus::interface;
 
+use crate::game::Game;
+
 const PLUGIN_NAME: &str = "apt-kwin-overlay-tracker";
 const CALLBACK_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.Callback";
 const CALLBACK_PATH: &str = "/";
 const CURSOR_QUERY_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback";
 
-/// The renderer's `windowTitle` setting (CLIENT->MAIN::update-host-config),
-/// lowercased + trimmed. Real APT attaches by this title alone; we match it
-/// in addition to the built-in PoE 1/2 captions below. Empty until the
-/// renderer sends its config.
-static WINDOW_TITLE: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+/// Each game renderer's `windowTitle` setting (CLIENT->MAIN::update-host-
+/// config), lowercased + trimmed, indexed like `Game::ALL`. Real APT/EE2
+/// attach by this title alone; we match it in addition to each game's
+/// built-in caption. Empty until that renderer sends its config.
+static WINDOW_TITLES: std::sync::RwLock<[String; 2]> = std::sync::RwLock::new([String::new(), String::new()]);
 
-pub fn set_window_title(title: &str) {
-    *WINDOW_TITLE.write().unwrap() = title.trim().to_ascii_lowercase();
+fn game_index(game: Game) -> usize {
+    Game::ALL.iter().position(|g| *g == game).unwrap()
 }
 
-fn configured_title() -> String {
-    WINDOW_TITLE.read().unwrap().clone()
+pub fn set_window_title(game: Game, title: &str) {
+    WINDOW_TITLES.write().unwrap()[game_index(game)] = title.trim().to_ascii_lowercase();
 }
 
 // The one definition of "is this PoE": used by `is_path_of_exile` here and
 // generated into the activate script's JS by `poe_matcher_js`.
 const POE_CLASS_SUBSTRING: &str = "pathofexile";
-const POE_CAPTIONS: &[&str] = &["path of exile", "path of exile 2"];
+
+/// Which game a window is, by exact caption: every game's built-in caption
+/// first, then the configured titles, so a custom title can't shadow the
+/// other game's real one. The class alone can't tell PoE1 from PoE2.
+fn game_of(caption: &str) -> Option<Game> {
+    let caption = caption.trim().to_ascii_lowercase();
+    let titles = WINDOW_TITLES.read().unwrap();
+    Game::ALL
+        .into_iter()
+        .find(|g| caption == g.caption())
+        .or_else(|| {
+            Game::ALL
+                .into_iter()
+                .find(|g| !titles[game_index(*g)].is_empty() && caption == titles[game_index(*g)])
+        })
+}
 
 fn is_path_of_exile(class_name: &str, caption: &str) -> bool {
-    let class = class_name.to_ascii_lowercase();
-    let caption = caption.trim().to_ascii_lowercase();
-    let title = configured_title();
-    class.contains(POE_CLASS_SUBSTRING)
-        || POE_CAPTIONS.contains(&caption.as_str())
-        || (!title.is_empty() && caption == title)
+    class_name.to_ascii_lowercase().contains(POE_CLASS_SUBSTRING) || game_of(caption).is_some()
+}
+
+/// Every caption `game_of` accepts right now.
+fn poe_captions() -> Vec<String> {
+    let titles = WINDOW_TITLES.read().unwrap();
+    let mut captions: Vec<String> = Game::ALL.iter().map(|g| g.caption().to_string()).collect();
+    captions.extend(titles.iter().filter(|t| !t.is_empty()).cloned());
+    captions
 }
 
 /// `is_path_of_exile` as a JS function `isPoe(w)` over a KWin window,
-/// with the current configured title baked in.
+/// with the current configured titles baked in.
 fn poe_matcher_js() -> String {
     format!(
         r#"function isPoe(w) {{
     var className = (w.resourceClass || "").toLowerCase();
     var caption = (w.caption || "").trim().toLowerCase();
-    var title = {title};
-    return className.indexOf({class}) !== -1 || {captions}.indexOf(caption) !== -1
-        || (title !== "" && caption === title);
+    return className.indexOf({class}) !== -1 || {captions}.indexOf(caption) !== -1;
 }}
 "#,
-        title = serde_json::Value::String(configured_title()),
         class = serde_json::Value::String(POE_CLASS_SUBSTRING.to_string()),
-        captions = serde_json::json!(POE_CAPTIONS),
+        captions = serde_json::json!(poe_captions()),
     )
 }
 
@@ -75,6 +92,12 @@ impl WindowEvent {
     /// overlay follow the browser around instead of the game.
     pub fn is_path_of_exile(&self) -> bool {
         is_path_of_exile(&self.class_name, &self.caption)
+    }
+
+    /// `None` for a PoE window matched by class only (or not PoE at all):
+    /// the caller keeps whatever game it had.
+    pub fn game(&self) -> Option<Game> {
+        game_of(&self.caption)
     }
 
     /// Our own overlay surface: KWin activates it whenever it becomes
@@ -363,20 +386,30 @@ mod tests {
         }
     }
 
+    // One test for everything touching the global WINDOW_TITLES, so
+    // parallel tests can't race each other's titles.
     #[test]
-    fn poe_matcher_js_embeds_the_shared_rule() {
+    fn games_by_caption_and_configured_titles() {
         let js = poe_matcher_js();
         assert!(js.contains(r#""pathofexile""#));
-        assert!(js.contains(r#"["path of exile","path of exile 2"]"#));
-    }
+        assert!(js.contains(r#"["path of exile","path of exile 2""#));
 
-    #[test]
-    fn matches_configured_window_title_in_addition_to_builtins() {
-        assert!(!window("PoE Custom").is_path_of_exile());
-        set_window_title("  PoE Custom ");
-        assert!(window("poe custom").is_path_of_exile());
-        assert!(window("Path of Exile").is_path_of_exile());
+        assert_eq!(window("Path of Exile").game(), Some(Game::Poe1));
+        assert_eq!(window(" path of exile 2 ").game(), Some(Game::Poe2));
         assert!(!window("Trade - Path of Exile - Browser").is_path_of_exile());
-        set_window_title("");
+        // Class-only match: PoE, but which game is unknown.
+        let by_class = WindowEvent { class_name: "PathOfExile_x64.exe".into(), ..window("") };
+        assert!(by_class.is_path_of_exile());
+        assert_eq!(by_class.game(), None);
+
+        assert!(!window("PoE Custom").is_path_of_exile());
+        set_window_title(Game::Poe2, "  PoE Custom ");
+        assert_eq!(window("poe custom").game(), Some(Game::Poe2));
+        assert!(poe_matcher_js().contains(r#""poe custom""#));
+        // A custom title never shadows the other game's built-in caption.
+        set_window_title(Game::Poe1, "Path of Exile 2");
+        assert_eq!(window("Path of Exile 2").game(), Some(Game::Poe2));
+        set_window_title(Game::Poe1, "");
+        set_window_title(Game::Poe2, "");
     }
 }

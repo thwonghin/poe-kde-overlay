@@ -2,7 +2,7 @@
 pkgname=apt-kwin-overlay
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Native KWin/Wayland backend for Awakened PoE Trade"
+pkgdesc="Native KWin/Wayland backend for Awakened PoE Trade (PoE1) and Exiled Exchange 2 (PoE2)"
 arch=('x86_64')
 url="https://github.com/thwonghin/apt-kwin-overlay"
 license=('MIT')
@@ -48,7 +48,8 @@ package() {
   cd "$pkgname"
   install -Dm755 target/release/apt-kwin-overlay "$pkgdir/usr/bin/apt-kwin-overlay"
   install -d "$pkgdir/usr/share/apt-kwin-overlay"
-  cp -r vendor/awakened-poe-trade/renderer/dist "$pkgdir/usr/share/apt-kwin-overlay/dist"
+  cp -r vendor/awakened-poe-trade/renderer/dist "$pkgdir/usr/share/apt-kwin-overlay/poe1"
+  cp -r vendor/exiled-exchange-2/renderer/dist "$pkgdir/usr/share/apt-kwin-overlay/poe2"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 data/io.github.thwonghin.AptKwinOverlay.desktop \
     "$pkgdir/usr/share/applications/io.github.thwonghin.AptKwinOverlay.desktop"

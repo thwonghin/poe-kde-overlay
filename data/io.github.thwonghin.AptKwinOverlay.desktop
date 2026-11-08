@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=apt-kwin-overlay
-Comment=Native KWin/Wayland backend for Awakened PoE Trade
+Comment=Native KWin/Wayland backend for Awakened PoE Trade (PoE1) and Exiled Exchange 2 (PoE2)
 Exec=apt-kwin-overlay
-Icon=/usr/share/apt-kwin-overlay/dist/icon.png
+Icon=applications-games
 Terminal=false
 Categories=Game;

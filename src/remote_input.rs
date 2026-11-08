@@ -21,6 +21,7 @@ use crate::logger::Logger;
 // this KDE version even with the session granted; EIS is the path KWin's
 // remote-input backend (and KDE Connect) actually uses.
 const KEY_LEFTCTRL: u32 = 29;
+const KEY_LEFTALT: u32 = 56;
 const KEY_C: u32 = 46;
 
 // XKB modifier mask bits as reported by ei_keyboard.modifiers (depressed).
@@ -88,10 +89,13 @@ const CLIPBOARD_READ_TIMEOUT_MS: u64 = 200;
 
 const CLIPBOARD_TEXT_MIME: &str = "text/plain;charset=utf-8";
 
-// HostClipboard.ts's LANGUAGE_DETECTOR: the first line of a real PoE item
-// clipboard dump always starts with one of these (localized "Item Class: "),
-// so a prefix match is enough to tell a genuine item paste apart from
-// whatever else happened to be on the clipboard.
+// HostClipboard.ts's LANGUAGE_DETECTOR, both renderers' combined (kept in
+// sync by the `item_text_signatures_match_both_vendors` test): the
+// first line of a real PoE item clipboard dump always starts with one of
+// these (localized "Item Class: "), so a prefix match is enough to tell a
+// genuine item paste apart from whatever else happened to be on the
+// clipboard. PoE2's uncut skill gems have no Item Class line and start at
+// "Rarity: " instead (EE2's uncutSkillGemLine); harmless for PoE1.
 const ITEM_TEXT_SIGNATURES: &[&str] = &[
     "Item Class: ",        // en
     "Класс предмета: ",    // ru
@@ -103,7 +107,34 @@ const ITEM_TEXT_SIGNATURES: &[&str] = &[
     "아이템 종류: ",           // ko
     "物品種類: ",             // cmn-Hant
     "物品类别: ",             // cmn-Hans
+    "アイテムクラス: ",       // ja (poe2)
+    // poe2 uncut skill gems (th and cmn-Hans use the English line)
+    "Rarity: ",
+    "Редкость: ",
+    "Rareté: ",
+    "Seltenheit: ",
+    "Raridade: ",
+    "Rareza: ",
+    "아이템 희귀도: ",
+    "稀有度: ",
+    "レアリティ: ",
 ];
+
+/// The copy keys as (evdev key, pressed?), like pressKeysToCopyItemText:
+/// modifiers the user already holds (`held`, an XKB depressed mask) aren't
+/// toggled, since injecting their release would clear the seat's state
+/// while the physical key is still down, breaking hold-to-pin.
+fn copy_sequence(with_alt: bool, held: u32) -> Vec<(u32, bool)> {
+    let mods: Vec<u32> = [(KEY_LEFTCTRL, MOD_CTRL, true), (KEY_LEFTALT, MOD_ALT, with_alt)]
+        .into_iter()
+        .filter(|&(_, mask, wanted)| wanted && held & mask == 0)
+        .map(|(key, _, _)| key)
+        .collect();
+    let mut seq: Vec<(u32, bool)> = mods.iter().map(|&k| (k, true)).collect();
+    seq.extend([(KEY_C, true), (KEY_C, false)]);
+    seq.extend(mods.iter().rev().map(|&k| (k, false)));
+    seq
+}
 
 fn looks_like_item_text(text: &str) -> bool {
     ITEM_TEXT_SIGNATURES.iter().any(|sig| text.starts_with(sig))
@@ -466,6 +497,7 @@ impl RemoteInput {
         restore: bool,
         hotkey: &str,
         keep_mod_keys: bool,
+        with_alt: bool,
     ) -> ashpd::Result<Option<String>> {
         // Press *before* the snapshot/clear, unlike HostClipboard.ts: a
         // snapshot first reads whatever owned the clipboard before (often
@@ -476,7 +508,7 @@ impl RemoteInput {
         // this Ctrl+C should end the first wait early.
         while self.text_copied.try_recv().is_ok() {}
         self.release_shortcut_keys(hotkey, keep_mod_keys);
-        self.press_copy(keep_mod_keys);
+        self.press_copy(keep_mod_keys, with_alt);
 
         let previous = match self.read_clipboard_if_offered().await {
             Ok(text) => text,
@@ -518,7 +550,7 @@ impl RemoteInput {
                 PollStep::Wait => {}
                 PollStep::Recopy => {
                     debug!("[remote_input] clipboard changed without item text; copying again");
-                    self.press_copy(keep_mod_keys);
+                    self.press_copy(keep_mod_keys, with_alt);
                 }
                 PollStep::TimedOut { changed } => {
                     self.logger.error(if changed {
@@ -616,24 +648,17 @@ impl RemoteInput {
         self.depressed_mods.get()
     }
 
-    /// Ctrl+C, but like pressKeysToCopyItemText, don't toggle Ctrl if the
-    /// user is already holding it (keepModKeys hotkeys leave it held):
-    /// injecting a Ctrl release would clear the seat's Ctrl state while the
-    /// physical key is still down, breaking hold-to-pin.
-    /// Only trusted with `keep_mod_keys`: otherwise release_shortcut_keys
-    /// just injected a Ctrl release that the mask doesn't reflect yet.
-    fn press_copy(&self, keep_mod_keys: bool) {
+    /// Ctrl(+Alt)+C (see `Game::copy_with_alt`) via `copy_sequence`.
+    /// The held mask is only trusted with `keep_mod_keys`: otherwise
+    /// release_shortcut_keys just injected releases it doesn't reflect yet.
+    fn press_copy(&self, keep_mod_keys: bool, with_alt: bool) {
         use ei::keyboard::KeyState::{Press, Released};
-        if keep_mod_keys && self.depressed_mods() & MOD_CTRL != 0 {
-            self.press_keys(&[(KEY_C, Press), (KEY_C, Released)]);
-        } else {
-            self.press_keys(&[
-                (KEY_LEFTCTRL, Press),
-                (KEY_C, Press),
-                (KEY_C, Released),
-                (KEY_LEFTCTRL, Released),
-            ]);
-        }
+        let held = if keep_mod_keys { self.depressed_mods() } else { 0 };
+        let seq: Vec<_> = copy_sequence(with_alt, held)
+            .into_iter()
+            .map(|(key, down)| (key, if down { Press } else { Released }))
+            .collect();
+        self.press_keys(&seq);
     }
 
     /// Port of Shortcuts.ts's key-up toggle before acting on a hotkey: the
@@ -673,6 +698,35 @@ impl RemoteInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upstream adding (or renaming) a language's first line fails here
+    /// instead of silently timing out the clipboard poll for that language,
+    /// and an entry neither vendor still has fails too.
+    #[test]
+    fn item_text_signatures_match_both_vendors() {
+        let mut upstream = std::collections::BTreeSet::new();
+        for source in crate::game::vendor_sources("main/src/shortcuts/HostClipboard.ts") {
+            let detector = &source[source.find("LANGUAGE_DETECTOR =").expect("LANGUAGE_DETECTOR moved")..];
+            for key in ["firstLine", "uncutSkillGemLine"] {
+                upstream.extend(crate::game::ts_string_values(detector, key));
+            }
+        }
+        let ours: std::collections::BTreeSet<String> =
+            ITEM_TEXT_SIGNATURES.iter().map(|s| s.to_string()).collect();
+        assert_eq!(ours, upstream, "ITEM_TEXT_SIGNATURES out of sync with upstream LANGUAGE_DETECTOR");
+    }
+
+    #[test]
+    fn copy_sequence_adds_alt_and_skips_held_mods() {
+        let (ctrl, alt, c) = (KEY_LEFTCTRL, KEY_LEFTALT, KEY_C);
+        assert_eq!(copy_sequence(false, 0), [(ctrl, true), (c, true), (c, false), (ctrl, false)]);
+        assert_eq!(
+            copy_sequence(true, 0),
+            [(ctrl, true), (alt, true), (c, true), (c, false), (alt, false), (ctrl, false)]
+        );
+        assert_eq!(copy_sequence(true, MOD_CTRL), [(alt, true), (c, true), (c, false), (alt, false)]);
+        assert_eq!(copy_sequence(false, MOD_CTRL | MOD_ALT), [(c, true), (c, false)]);
+    }
 
     #[test]
     fn chat_sequence_matches_text_box_ts() {
@@ -751,6 +805,8 @@ mod tests {
     fn restore_skips_item_text() {
         assert_eq!(restore_value(Some("my notes")), "my notes");
         assert_eq!(restore_value(Some("Item Class: Body Armours\nRarity: Rare")), "");
+        // poe2 uncut skill gem: no Item Class line.
+        assert!(looks_like_item_text("Rarity: Currency\nUncut Skill Gem"));
         assert_eq!(restore_value(None), "");
     }
 }

@@ -3,20 +3,28 @@
 //! only widget-free way to quit/reopen the app. "Settings/League" (real
 //! APT's message-box item pointing at the in-game overlay-key hint) is
 //! dropped: there's no equivalent in-overlay Settings-access hint flow here
-//! for it to point at.
+//! for it to point at. Instead there's one settings entry per game, the only
+//! way to reach the game that isn't focused (main.rs's `switch_game`).
 
 use gtk4::gdk_pixbuf::Pixbuf;
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, Tray, TrayMethods};
 
+use crate::game::Game;
+
 pub enum TrayAction {
-    OpenBrowser,
+    /// That game's renderer in the default browser: browser mode is always
+    /// interactive, so its Settings are one click away.
+    OpenSettings(Game),
     OpenConfigFolder,
     Quit,
 }
 
 struct AppTray {
     action_tx: async_channel::Sender<TrayAction>,
+    games: Vec<Game>,
+    /// Icon source; generic theme icon until a game is focused.
+    active: Option<Game>,
 }
 
 impl Tray for AppTray {
@@ -35,20 +43,30 @@ impl Tray for AppTray {
         }
     }
 
+    fn icon_name(&self) -> String {
+        if self.active.is_none() { "applications-games".into() } else { String::new() }
+    }
+
     fn icon_pixmap(&self) -> Vec<Icon> {
-        load_icon().into_iter().collect()
+        self.active.and_then(load_icon).into_iter().collect()
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        vec![
-            StandardItem {
-                label: "Open in Browser".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.action_tx.try_send(TrayAction::OpenBrowser);
-                }),
-                ..Default::default()
-            }
-            .into(),
+        let mut items: Vec<MenuItem<Self>> = self
+            .games
+            .iter()
+            .map(|&game| {
+                StandardItem {
+                    label: format!("{} settings", game.label()),
+                    activate: Box::new(move |this: &mut Self| {
+                        let _ = this.action_tx.try_send(TrayAction::OpenSettings(game));
+                    }),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+        items.extend([
             StandardItem {
                 label: "Open config folder".into(),
                 activate: Box::new(|this: &mut Self| {
@@ -67,28 +85,36 @@ impl Tray for AppTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 }
 
 /// Spawns a dedicated thread that registers the tray's D-Bus service, then
-/// exits — mirrors `kwin_tracker::spawn`'s shape, but the tray itself
-/// doesn't need this thread to stay alive: `Tray::spawn().await` hands its
-/// background D-Bus/menu handling off to `ksni`'s own globally-shared
-/// executor thread (see `ksni::compat`'s `async-io` backend), which keeps
-/// running independently for the process's lifetime.
-pub fn spawn() -> async_channel::Receiver<TrayAction> {
+/// waits for active-game changes to swap the icon (mirrors
+/// `kwin_tracker::spawn`'s shape; the D-Bus/menu handling itself runs on
+/// `ksni`'s own executor thread, see `ksni::compat`'s `async-io` backend).
+/// Returns the menu actions, and where to send the newly active game.
+pub fn spawn(games: Vec<Game>) -> (async_channel::Receiver<TrayAction>, async_channel::Sender<Option<Game>>) {
     let (action_tx, action_rx) = async_channel::unbounded();
+    let (active_tx, active_rx) = async_channel::unbounded::<Option<Game>>();
     std::thread::spawn(move || {
-        if let Err(err) = async_io::block_on(async { AppTray { action_tx }.spawn().await.map(drop) }) {
+        let run = async {
+            let handle = AppTray { action_tx, games, active: None }.spawn().await?;
+            while let Ok(game) = active_rx.recv().await {
+                handle.update(|tray| tray.active = game).await;
+            }
+            Ok::<_, ksni::Error>(())
+        };
+        if let Err(err) = async_io::block_on(run) {
             eprintln!("[tray] error: {err}");
         }
     });
-    action_rx
+    (action_rx, active_tx)
 }
 
-fn load_icon() -> Option<Icon> {
-    let path = crate::server::dist_dir().join("icon.png");
+fn load_icon(game: Game) -> Option<Icon> {
+    let path = game.dist_dir().join("icon.png");
     let pixbuf = match Pixbuf::from_file(&path) {
         Ok(pixbuf) => pixbuf,
         Err(err) => {

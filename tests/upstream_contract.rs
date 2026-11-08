@@ -1,5 +1,6 @@
-//! Fails when renderer markup or text `src/` relies on disappears from the
-//! vendored upstream, e.g. after a submodule bump renames an i18n key.
+//! Fails when renderer markup or text `src/` relies on disappears from
+//! either vendored upstream (poe1 and poe2 renderers), e.g. after a
+//! submodule bump renames an i18n key.
 //! IPC events and payloads are checked by the compiler instead: see
 //! src/ipc.rs.
 
@@ -11,25 +12,32 @@ fn read(path: &str) -> String {
         .unwrap_or_else(|e| panic!("{}: {e} (submodule checked out?)", full.display()))
 }
 
+const VENDORS: [&str; 2] = ["awakened-poe-trade", "exiled-exchange-2"];
+
 /// hotkey_ui_info.js finds the Settings tabs by these labels: the key path
 /// it fetches translations by, and the English text it matches before any
 /// translation has loaded.
 #[test]
 fn settings_banner_markers_exist_upstream() {
     let js = read("src/hotkey_ui_info.js");
-    let en: serde_json::Value =
-        serde_json::from_str(&read("vendor/awakened-poe-trade/renderer/public/data/en/app_i18n.json"))
-            .unwrap();
-    for (section, key) in [
-        ("settings", "clear_hotkey"),
-        ("item", "open_on_wiki"),
-        ("price_check", "auto_search"),
-    ] {
-        assert!(js.contains(&format!("['{section}', '{key}']")), "{section}.{key} not used by the JS");
-        let text = en[section][key]
-            .as_str()
-            .unwrap_or_else(|| panic!("{section}.{key} missing from en/app_i18n.json"));
-        assert!(js.contains(&format!("'{text}'")), "JS's English fallback for {section}.{key} isn't {text:?}");
+    for vendor in VENDORS {
+        let en: serde_json::Value =
+            serde_json::from_str(&read(&format!("vendor/{vendor}/renderer/public/data/en/app_i18n.json")))
+                .unwrap();
+        for (section, key) in [
+            ("settings", "clear_hotkey"),
+            ("item", "open_on_wiki"),
+            ("price_check", "auto_search"),
+        ] {
+            assert!(js.contains(&format!("['{section}', '{key}']")), "{section}.{key} not used by the JS");
+            let text = en[section][key]
+                .as_str()
+                .unwrap_or_else(|| panic!("{vendor}: {section}.{key} missing from en/app_i18n.json"));
+            assert!(
+                js.contains(&format!("'{text}'")),
+                "{vendor}: JS's English fallback for {section}.{key} isn't {text:?}"
+            );
+        }
     }
 }
 
@@ -38,14 +46,18 @@ fn settings_banner_markers_exist_upstream() {
 /// and area.
 #[test]
 fn price_check_window_still_sends_track_area() {
-    let vue = read("vendor/awakened-poe-trade/renderer/src/web/price-check/PriceCheckWindow.vue");
-    for needle in [
-        "'MAIN->CLIENT::item-text'",
-        "e.target !== 'price-check'",
-        "'OVERLAY->MAIN::track-area'",
-        "holdKey:",
-        "area: {",
-    ] {
-        assert!(vue.contains(needle), "PriceCheckWindow.vue no longer contains {needle:?}");
+    for vendor in VENDORS {
+        // poe2's source is prettier-formatted with double quotes.
+        let vue = read(&format!("vendor/{vendor}/renderer/src/web/price-check/PriceCheckWindow.vue"))
+            .replace('"', "'");
+        for needle in [
+            "'MAIN->CLIENT::item-text'",
+            "e.target !== 'price-check'",
+            "'OVERLAY->MAIN::track-area'",
+            "holdKey:",
+            "area: {",
+        ] {
+            assert!(vue.contains(needle), "{vendor}: PriceCheckWindow.vue no longer contains {needle:?}");
+        }
     }
 }

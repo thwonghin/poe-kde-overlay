@@ -1,2 +1,3 @@
 [env]
-APT_KWIN_OVERLAY_DIST = { value = "vendor/awakened-poe-trade/renderer/dist", relative = true }
+APT_KWIN_OVERLAY_POE1_DIST = { value = "vendor/awakened-poe-trade/renderer/dist", relative = true }
+APT_KWIN_OVERLAY_POE2_DIST = { value = "vendor/exiled-exchange-2/renderer/dist", relative = true }

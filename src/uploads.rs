@@ -4,17 +4,18 @@ use std::path::PathBuf;
 use md5::{Digest, Md5};
 use serde_json::json;
 
+use crate::game::Game;
 use crate::server::write_response;
 
-fn uploads_dir() -> PathBuf {
-    crate::xdg::data_dir().join("apt-kwin-overlay/uploads")
+fn uploads_dir(game: Game) -> PathBuf {
+    game.data_dir().join("uploads")
 }
 
-pub fn handle(stream: &mut TcpStream, method: &str, path: &str, body: &[u8]) -> std::io::Result<()> {
+pub fn handle(game: Game, stream: &mut TcpStream, method: &str, path: &str, body: &[u8]) -> std::io::Result<()> {
     let name = path.strip_prefix("/uploads/").unwrap_or("");
 
     if method == "GET" {
-        let Some(file) = crate::server::safe_join(&uploads_dir(), name) else {
+        let Some(file) = crate::server::safe_join(&uploads_dir(game), name) else {
             return write_response(stream, 404, "text/plain", b"not found");
         };
         match std::fs::read(file) {
@@ -22,7 +23,7 @@ pub fn handle(stream: &mut TcpStream, method: &str, path: &str, body: &[u8]) -> 
             Err(_) => write_response(stream, 404, "text/plain", b"not found"),
         }
     } else if method == "POST" {
-        let dir = uploads_dir();
+        let dir = uploads_dir(game);
         std::fs::create_dir_all(&dir)?;
         let hash = Md5::digest(body)
             .iter()

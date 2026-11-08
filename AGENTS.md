@@ -1,9 +1,14 @@
 # AGENTS.md
 
-Rust/GTK4 replacement for Awakened PoE Trade's Electron `main/` process on
-KDE Plasma (Wayland). The UI is the real, unmodified upstream renderer from
-the `vendor/awakened-poe-trade` submodule; `src/*.rs` reimplements
-`vendor/awakened-poe-trade/main/src/*` (IPC types: `ipc/types.ts`).
+Rust/GTK4 replacement for the Electron `main/` process of two PoE
+price-check overlays on KDE Plasma (Wayland), served as equal peers:
+**poe1** = Awakened PoE Trade (`vendor/awakened-poe-trade`), **poe2** =
+Exiled Exchange 2 (`vendor/exiled-exchange-2`, its fork). The UI is the
+real, unmodified upstream renderer of whichever game is focused
+(`Overlay::switch_game`); `src/*.rs` reimplements both vendors'
+`main/src/*` (IPC types: `ipc/types.ts`). In our code, say poe1/poe2 (see
+`src/game.rs`), never apt/ee2, and never make one game a default or
+fallback for the other.
 
 ## Start here
 
@@ -17,7 +22,7 @@ the `vendor/awakened-poe-trade` submodule; `src/*.rs` reimplements
 ## Build / run / test
 
 ```sh
-./scripts/build-renderer.sh   # once, or after bumping the submodule
+./scripts/build-renderer.sh   # once, or after bumping either submodule
 cargo run --release           # dev run; dist path comes from .cargo/config.toml
 cargo test
 ```
@@ -27,7 +32,10 @@ real KDE session with PoE running — say so when a change is untested live.
 
 ## Conventions
 
-- Never modify the vendored submodule; work around it from `src/`.
+- Never modify either vendored submodule; work around them from `src/`.
+- Lists mirrored from both vendors' `main/` (item-text signatures, proxy
+  hosts) have drift tests that read the vendor sources; update the list,
+  not the test, when one fails after a bump.
 - When porting upstream behavior, read the vendor TS files directly rather
   than relying on summaries — validation/edge-case logic is easy to miss.
 - The GTK main thread runs the hotkey loop: never block it (no shared

@@ -245,7 +245,7 @@ async fn run(
                 focus_overlay,
             } => price_check(overlay, target, focus_overlay, &hotkey, action.keep_mod_keys).await,
             ActionKind::TriggerEvent { target } => overlay
-                .events
+                .events()
                 .broadcast(&MainEvent::WidgetAction { target }),
             ActionKind::PasteInChat { .. } | ActionKind::StashSearch { .. } => {
                 // Real APT has every hotkey unregistered while the overlay
@@ -328,6 +328,13 @@ async fn price_check(
         return;
     }
 
+    // Class-only PoE match before any caption named the game: no renderer
+    // to show the result in, nor a way to tell which copy keys it wants.
+    let Some(game) = overlay.active.get() else {
+        debug!("[shortcuts] price-check ignored: no game identified yet");
+        return;
+    };
+
     let started = Instant::now();
     let Some(remote) = overlay.remote() else {
         overlay.logger.error("[shortcuts] price-check: remote input not ready yet");
@@ -368,7 +375,7 @@ async fn price_check(
             return None;
         }
         let copied = remote
-            .copy_item_text(overlay.restore_clipboard.get(), shortcut, keep_mod_keys)
+            .copy_item_text(overlay.restore_clipboard.get(), shortcut, keep_mod_keys, game.copy_with_alt())
             .await;
         Some((cursor, copied))
     };
@@ -409,8 +416,8 @@ async fn price_check(
     // focusOverlay matches the real app's hotkey semantics
     // (PriceCheckWindow.vue): plain Ctrl+D auto-closes on mouse-move-away
     // (spawn_auto_close), Ctrl+Alt+D ("hotkeyLocked") opens interactive.
-    overlay.events.clear_track_area();
-    overlay.events.send_last_active(&MainEvent::ItemText {
+    overlay.events().clear_track_area();
+    overlay.events().send_last_active(&MainEvent::ItemText {
         target: target.to_string(),
         clipboard,
         position: Point { x, y },
@@ -426,7 +433,7 @@ async fn price_check(
     // if a plain browser tab (tray's "Open in Browser") got the item-text,
     // there's no overlay popup to interact with, so don't steal input from
     // the game.
-    if focus_overlay && overlay.events.overlay_was_used_recently() {
+    if focus_overlay && overlay.events().overlay_was_used_recently() {
         overlay.set_click_through(false);
         overlay.price_check_locked.set(true);
     } else if target == "price-check" {
@@ -538,7 +545,7 @@ fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
                 return;
             }
 
-            let track = overlay.events.track_area();
+            let track = overlay.events().track_area();
             let mods = overlay.remote().map_or(0, |r: Rc<RemoteInput>| r.depressed_mods());
             let holding = track
                 .as_ref()

@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Builds the unmodified upstream renderer (Vue UI) from the vendored
-# awakened-poe-trade submodule. Run this whenever the submodule is updated.
+# Builds both unmodified upstream renderers (Vue UIs): poe1 from the
+# awakened-poe-trade submodule, poe2 from exiled-exchange-2. Run this
+# whenever either submodule is updated.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/../vendor/awakened-poe-trade/renderer"
+root="$(dirname "${BASH_SOURCE[0]}")/.."
 
-npm ci
-npm run build
-
-echo "renderer built at vendor/awakened-poe-trade/renderer/dist/"
+for vendor in awakened-poe-trade exiled-exchange-2; do
+  (
+    cd "$root/vendor/$vendor/renderer"
+    npm ci
+    # poe2's renderer generates its data/*/…index.bin lookups (gitignored
+    # there, committed in poe1's); without them it crashes on startup.
+    npm run --if-present make-index-files
+    npm run build
+  )
+  echo "renderer built at vendor/$vendor/renderer/dist/"
+done

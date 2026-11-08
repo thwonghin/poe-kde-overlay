@@ -6,26 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-
 use crate::config_store::ConfigStore;
+use crate::game::Game;
 use crate::host_config::ParsedHostConfig;
 use crate::ipc::{ClientEvent, HostState, MainEvent, TrackArea, UpdateInfo, UserAction};
 use crate::logger::Logger;
-
-// `cargo run` gets APT_KWIN_OVERLAY_DIST for free from .cargo/config.toml's
-// [env] table (set relative to the repo root); anything else needs it
-// exported explicitly, otherwise this falls back to where the PKGBUILD
-// installs it.
-pub(crate) fn dist_dir() -> &'static Path {
-    static DIST_DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIST_DIR.get_or_init(|| resolve_dist_dir(std::env::var_os("APT_KWIN_OVERLAY_DIST")))
-}
-
-fn resolve_dist_dir(env_override: Option<std::ffi::OsString>) -> PathBuf {
-    env_override
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/share/apt-kwin-overlay/dist"))
-}
 
 /// `base` joined with a request-path remainder, or `None` if it would
 /// escape `base` (`..`, absolute, or otherwise non-plain components).
@@ -191,28 +176,34 @@ impl EventBus {
     }
 }
 
+/// One game's renderer backend: its own port, event bus, dist/ and data
+/// dir, so the two games' clients and configs never mix. `logger` is shared
+/// across games (main.rs), so it gets this bus attached here.
 pub struct Server {
+    pub game: Game,
+    pub port: u16,
     pub events: Arc<EventBus>,
-    pub logger: Arc<Logger>,
     pub ui_request_rx: async_channel::Receiver<UiRequest>,
     pub host_config_rx: async_channel::Receiver<ParsedHostConfig>,
 }
 
-pub fn spawn() -> std::io::Result<(u16, Server)> {
+pub fn spawn(game: Game, logger: Arc<Logger>) -> std::io::Result<Server> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
     let (event_bus, ui_request_rx, host_config_rx) = EventBus::new();
     let events = Arc::new(event_bus);
     started_at_ms();
+    logger.attach(events.clone());
     let server = Server {
+        game,
+        port,
         events: events.clone(),
-        logger: Arc::new(Logger::new(events.clone())),
         ui_request_rx,
         host_config_rx,
     };
-    let config = Arc::new(ConfigStore::new(crate::config_store::config_path()));
-    let logger = server.logger.clone();
+    let config = Arc::new(ConfigStore::new(crate::config_store::config_path(game)));
+    let dist: &'static Path = Box::leak(game.dist_dir().into_boxed_path());
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -222,7 +213,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
                     let config = config.clone();
                     let logger = logger.clone();
                     std::thread::spawn(move || {
-                        if let Err(err) = handle_connection(stream, &events, &config, &logger) {
+                        if let Err(err) = handle_connection(game, dist, stream, &events, &config, &logger) {
                             eprintln!("[server] connection error: {err}");
                         }
                     });
@@ -232,10 +223,12 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
         }
     });
 
-    Ok((port, server))
+    Ok(server)
 }
 
 fn handle_connection(
+    game: Game,
+    dist: &Path,
     stream: TcpStream,
     events: &Arc<EventBus>,
     config: &Arc<ConfigStore>,
@@ -250,13 +243,14 @@ fn handle_connection(
     let first_line = &peek_buf[..first_line_end];
 
     if first_line.starts_with(b"GET /events") {
-        return handle_websocket(stream, events, config, logger);
+        return handle_websocket(game, stream, events, config, logger);
     }
 
-    handle_http(stream, config, logger)
+    handle_http(game, dist, stream, config, logger)
 }
 
 fn handle_websocket(
+    game: Game,
     stream: TcpStream,
     events: &Arc<EventBus>,
     config: &Arc<ConfigStore>,
@@ -317,7 +311,7 @@ fn handle_websocket(
         loop {
             match ws.read() {
                 Ok(tungstenite::Message::Text(text)) => {
-                    handle_client_event(&text, id, events, config, logger);
+                    handle_client_event(game, &text, id, events, config, logger);
                 }
                 Ok(tungstenite::Message::Close(_)) => break 'conn,
                 Ok(_) => {}
@@ -362,6 +356,7 @@ fn handle_websocket(
 }
 
 fn handle_client_event(
+    game: Game,
     text: &str,
     from: ClientId,
     events: &Arc<EventBus>,
@@ -395,7 +390,7 @@ fn handle_client_event(
                 parsed.shortcuts.len(),
                 parsed.restore_clipboard
             );
-            crate::kwin_tracker::set_window_title(&parsed.window_title);
+            crate::kwin_tracker::set_window_title(game, &parsed.window_title);
             let _ = events.host_config_tx.try_send(parsed);
         }
         ClientEvent::UserAction(UserAction::Quit) => events.request_ui(UiRequest::Quit),
@@ -405,6 +400,7 @@ fn handle_client_event(
         ClientEvent::UserAction(
             UserAction::CheckForUpdate | UserAction::UpdateAndRestart | UserAction::Unknown,
         ) => {}
+        ClientEvent::RenderState(_) | ClientEvent::WriteData(_) | ClientEvent::ReparseLog => {}
         ClientEvent::SaveConfig { contents, is_temporary } => {
             config.save(&contents, is_temporary, logger);
             events.broadcast(&MainEvent::ConfigChanged { contents });
@@ -413,6 +409,8 @@ fn handle_client_event(
 }
 
 fn handle_http(
+    game: Game,
+    dist: &Path,
     stream: TcpStream,
     config: &Arc<ConfigStore>,
     logger: &Arc<Logger>,
@@ -466,14 +464,14 @@ fn handle_http(
     }
 
     if path.starts_with("/uploads/") {
-        return crate::uploads::handle(&mut stream, &method, file_path, &body);
+        return crate::uploads::handle(game, &mut stream, &method, file_path, &body);
     }
 
     if path.starts_with("/proxy/") {
         return crate::proxy::handle(&mut stream, &method, &path, &headers, &body, logger);
     }
 
-    serve_static(&mut stream, file_path)
+    serve_static(dist, &mut stream, file_path)
 }
 
 /// Process start time, reported as the updater's `checkedAt` — `0` made the
@@ -487,9 +485,9 @@ fn started_at_ms() -> u64 {
     })
 }
 
-fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
+fn serve_static(dist: &Path, stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
     let path = if path == "/" { "/index.html" } else { path };
-    let Some(file_path) = safe_join(dist_dir(), path.trim_start_matches('/')) else {
+    let Some(file_path) = safe_join(dist, path.trim_start_matches('/')) else {
         return write_response(stream, 404, "text/plain", b"not found");
     };
 
@@ -575,12 +573,6 @@ mod tests {
         assert!(!t.area.contains(1600.0, 1440.0));
     }
 
-    #[test]
-    fn dist_dir_falls_back_to_system_path_without_override() {
-        assert_eq!(resolve_dist_dir(None), Path::new("/usr/share/apt-kwin-overlay/dist"));
-        assert_eq!(resolve_dist_dir(Some("/x".into())), Path::new("/x"));
-    }
-
     fn raw_request(port: u16, request: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
@@ -591,7 +583,7 @@ mod tests {
 
     #[test]
     fn server_rejects_traversal_oversized_bodies_and_cross_origin_websockets() {
-        let (port, _server) = spawn().unwrap();
+        let port = spawn(Game::Poe1, Arc::new(Logger::new())).unwrap().port;
         let get = |path: &str| raw_request(port, &format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"));
         assert!(get("/../../../../etc/passwd").starts_with("HTTP/1.1 404"));
         assert!(get("/uploads/../../../../etc/passwd").starts_with("HTTP/1.1 404"));
@@ -624,7 +616,8 @@ mod tests {
     fn websocket_delivers_both_ways_without_polling_delay() {
         use tungstenite::client::IntoClientRequest;
 
-        let (port, server) = spawn().unwrap();
+        let server = spawn(Game::Poe1, Arc::new(Logger::new())).unwrap();
+        let port = server.port;
         let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let request = format!("ws://127.0.0.1:{port}/events").into_client_request().unwrap();
@@ -716,13 +709,14 @@ mod tests {
     fn client_events_reach_their_handlers() {
         let (bus, ui_rx, _cfg) = EventBus::new();
         let events = Arc::new(bus);
-        let logger = Arc::new(Logger::new(events.clone()));
+        let logger = Arc::new(Logger::new());
+        logger.attach(events.clone());
         let dir = std::env::temp_dir().join(format!("apt-client-events-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = Arc::new(ConfigStore::new(dir.join("config.json")));
         let (tx, inbox) = std::sync::mpsc::channel();
         let id = events.add_client(Client { tx, poller: Arc::new(polling::Poller::new().unwrap()) });
-        let send = |event: Value| handle_client_event(&event.to_string(), id, &events, &config, &logger);
+        let send = |event: Value| handle_client_event(Game::Poe1, &event.to_string(), id, &events, &config, &logger);
 
         // save-config persists and echoes the contents to every client.
         send(json!({ "name": "CLIENT->MAIN::save-config", "payload": { "contents": "{\"a\":1}", "isTemporary": false } }));
@@ -752,7 +746,7 @@ mod tests {
         send(json!({ "name": "CLIENT->MAIN::user-action", "payload": { "action": "stash-search", "text": "chaos" } }));
         send(json!({ "name": "CLIENT->MAIN::user-action", "payload": { "action": "check-for-update" } }));
         send(json!({ "name": "CLIENT->MAIN::nonsense" }));
-        handle_client_event("not json", id, &events, &config, &logger);
+        handle_client_event(Game::Poe1, "not json", id, &events, &config, &logger);
         assert!(matches!(ui_rx.try_recv(), Ok(UiRequest::FocusGame)));
         assert!(matches!(ui_rx.try_recv(), Ok(UiRequest::StashSearch(t)) if t == "chaos"));
         assert!(ui_rx.try_recv().is_err());

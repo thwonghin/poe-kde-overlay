@@ -15,6 +15,7 @@ pub(crate) fn debug_enabled() -> bool {
 }
 
 mod config_store;
+mod game;
 mod host_config;
 mod ipc;
 mod kwin_tracker;
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use gtk4::cairo::Region;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, glib};
+use game::Game;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use ipc::MainEvent;
 use kwin_tracker::TrackerEvent;
@@ -114,7 +116,19 @@ fn main() -> glib::ExitCode {
 /// process behind one `Rc`.
 pub(crate) struct Overlay {
     pub window: ApplicationWindow,
-    pub events: Arc<server::EventBus>,
+    webview: WebView,
+    /// Each available game's (port, bus); `active` picks the one the
+    /// WebView shows (`switch_game`).
+    games: Vec<(Game, u16, Arc<server::EventBus>)>,
+    /// The focused game's renderer, `None` until a game is identified.
+    pub active: Cell<Option<Game>>,
+    /// Bus with no clients, standing in while no game is active: sends go
+    /// nowhere, the same as before any renderer connects.
+    idle: Arc<server::EventBus>,
+    /// A switch reloaded the WebView: the new renderer's first host config
+    /// (its "ready" signal) gets the overlay-attached a fresh attach would.
+    attach_pending: Cell<bool>,
+    tray_active: async_channel::Sender<Option<Game>>,
     pub logger: Arc<logger::Logger>,
     /// Starts true: read from the moment the app starts, before the
     /// deferred idle callback in `build_ui` applies it to the surface.
@@ -135,6 +149,44 @@ pub(crate) struct Overlay {
 }
 
 impl Overlay {
+    /// The active game's bus (see `idle`).
+    pub fn events(&self) -> Arc<server::EventBus> {
+        let active = self.active.get();
+        self.games
+            .iter()
+            .find(|(game, _, _)| Some(*game) == active)
+            .map_or_else(|| self.idle.clone(), |(_, _, bus)| bus.clone())
+    }
+
+    fn port_of(&self, game: Game) -> Option<u16> {
+        self.games.iter().find(|(g, _, _)| *g == game).map(|(_, port, _)| *port)
+    }
+
+    /// Shows `game`'s renderer: the focused game alone decides this. A game
+    /// whose renderer isn't built shows nothing rather than the other's.
+    /// ponytail: reloads the one WebView (~1-2s), so a hotkey pressed
+    /// mid-reload is lost; a WebView per game in a GtkStack if that matters.
+    pub fn switch_game(&self, game: Option<Game>) {
+        let game = game.filter(|g| self.port_of(*g).is_some());
+        if self.active.get() == game {
+            return;
+        }
+        println!("[main] overlay now shows {}", game.map_or("nothing", Game::name));
+        self.price_check_open.set(false);
+        self.price_check_locked.set(false);
+        self.auto_close_gen.set(self.auto_close_gen.get() + 1);
+        self.set_click_through(true);
+        self.active.set(game);
+        let _ = self.tray_active.try_send(game);
+        match game.and_then(|g| self.port_of(g)) {
+            Some(port) => {
+                self.attach_pending.set(true);
+                self.webview.load_uri(&format!("http://127.0.0.1:{port}/"));
+            }
+            None => self.webview.load_uri("about:blank"),
+        }
+    }
+
     pub fn kwin(&self) -> Option<zbus::Connection> {
         self.kwin_connection.borrow().clone()
     }
@@ -169,7 +221,7 @@ impl Overlay {
         // price-check window) in reaction to this event
         // (renderer/src/web/overlay/OverlayWindow.vue). click-through ON
         // maps to "overlay not active", OFF to "overlay active".
-        self.events.broadcast(&MainEvent::FocusChange {
+        self.events().broadcast(&MainEvent::FocusChange {
             game: now_click_through,
             overlay: !now_click_through,
             using_hotkey: true,
@@ -177,7 +229,7 @@ impl Overlay {
     }
 
     pub fn hide_price_check(&self) {
-        self.events.broadcast(&MainEvent::HideExclusiveWidget);
+        self.events().broadcast(&MainEvent::HideExclusiveWidget);
         self.price_check_open.set(false);
     }
 
@@ -254,8 +306,20 @@ fn build_ui(app: &Application) {
     // interface instead (remote_input.rs).
     window.set_keyboard_mode(KeyboardMode::None);
 
-    let (port, backend) = match server::spawn() {
-        Ok(v) => v,
+    let logger = Arc::new(logger::Logger::new());
+    let spawned: std::io::Result<Vec<server::Server>> = Game::ALL
+        .into_iter()
+        .filter(|game| {
+            let available = game.available();
+            if !available {
+                eprintln!("[main] no {} renderer at {:?}: {} unsupported", game.name(), game.dist_dir(), game.label());
+            }
+            available
+        })
+        .map(|game| server::spawn(game, logger.clone()))
+        .collect();
+    let servers = match spawned {
+        Ok(servers) => servers,
         Err(err) => {
             eprintln!("[main] failed to start local server: {err}");
             let dialog = gtk4::AlertDialog::builder()
@@ -273,15 +337,21 @@ fn build_ui(app: &Application) {
             return;
         }
     };
-    println!("[main] server listening on 127.0.0.1:{port}");
+    let games: Vec<(Game, u16, Arc<server::EventBus>)> =
+        servers.iter().map(|s| (s.game, s.port, s.events.clone())).collect();
+    for (game, port, _) in &games {
+        println!("[main] {} server listening on 127.0.0.1:{port}", game.name());
+    }
 
-    let tray_rx = tray::spawn();
+    let (tray_rx, tray_active) = tray::spawn(games.iter().map(|(game, _, _)| *game).collect());
     {
         let app = app.clone();
+        let ports: Vec<(Game, u16)> = games.iter().map(|(game, port, _)| (*game, *port)).collect();
         glib::spawn_future_local(async move {
             while let Ok(action) = tray_rx.recv().await {
                 match action {
-                    tray::TrayAction::OpenBrowser => {
+                    tray::TrayAction::OpenSettings(game) => {
+                        let Some((_, port)) = ports.iter().find(|(g, _)| *g == game) else { continue };
                         let _ = gtk4::gio::AppInfo::launch_default_for_uri(
                             &format!("http://127.0.0.1:{port}/"),
                             gtk4::gio::AppLaunchContext::NONE,
@@ -337,7 +407,7 @@ fn build_ui(app: &Application) {
         None
     });
 
-    webview.load_uri(&format!("http://127.0.0.1:{port}/"));
+    // Blank until a game is focused (Overlay::switch_game loads its renderer).
     window.set_child(Some(&webview));
 
     // Transparent CSS background so the layer surface itself doesn't paint opaque.
@@ -361,8 +431,13 @@ fn build_ui(app: &Application) {
 
     let overlay = Rc::new(Overlay {
         window: window.clone(),
-        events: backend.events.clone(),
-        logger: backend.logger.clone(),
+        webview,
+        games,
+        active: Cell::new(None),
+        idle: Arc::new(server::EventBus::new().0),
+        attach_pending: Cell::new(false),
+        tray_active,
+        logger,
         click_through: Cell::new(true),
         price_check_open: Cell::new(false),
         price_check_locked: Cell::new(false),
@@ -373,8 +448,9 @@ fn build_ui(app: &Application) {
         remote_input: RefCell::new(None),
     });
 
-    // Renderer requests (server.rs's UiRequest).
-    {
+    // Renderer requests (server.rs's UiRequest), from either game: Quit and
+    // the stash-search widget work from a browser tab too, as upstream.
+    for backend in &servers {
         let app = app.clone();
         let overlay = overlay.clone();
         let ui_request_rx = backend.ui_request_rx.clone();
@@ -400,13 +476,23 @@ fn build_ui(app: &Application) {
     // CLIENT->MAIN::update-host-config: restoreClipboard applies right away;
     // the shortcut list goes on to shortcuts.rs, which only reads it once
     // its GlobalShortcuts session is up (if that never happens, the
-    // stash-search widget still gets the right restoreClipboard).
+    // stash-search widget still gets the right restoreClipboard). Only the
+    // active game's counts: the other one's comes from its browser tab, and
+    // its renderer resends its own on the next switch.
     let (shortcuts_tx, shortcuts_rx) = async_channel::unbounded();
-    {
+    for backend in &servers {
+        let game = backend.game;
         let overlay = overlay.clone();
+        let shortcuts_tx = shortcuts_tx.clone();
         let host_config_rx = backend.host_config_rx.clone();
         glib::spawn_future_local(async move {
             while let Ok(config) = host_config_rx.recv().await {
+                if overlay.active.get() != Some(game) {
+                    continue;
+                }
+                if overlay.attach_pending.replace(false) {
+                    overlay.events().broadcast(&MainEvent::OverlayAttached);
+                }
                 overlay.restore_clipboard.set(config.restore_clipboard);
                 let _ = shortcuts_tx.send(config.shortcuts).await;
             }
@@ -446,14 +532,22 @@ fn build_ui(app: &Application) {
                                 "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
                                 w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                             );
+                            // Class-only match (no game): keep what's shown.
+                            if let Some(game) = w.game() {
+                                overlay.switch_game(Some(game));
+                            }
                             move_overlay_to_window_monitor(&overlay, &w);
                             // Real APT sends this whenever electron-overlay-window
                             // attaches to a PoE window; drives the renderer's
                             // "overlay ready" toast (LoadingAnimation.vue). A
-                            // new pid means the game was restarted.
+                            // new pid means the game was restarted. Right
+                            // after a switch the renderer is still loading;
+                            // attach_pending sends it once it's up.
                             if attached_pid != Some(w.pid) {
                                 attached_pid = Some(w.pid);
-                                overlay.events.broadcast(&MainEvent::OverlayAttached);
+                                if !overlay.attach_pending.get() {
+                                    overlay.events().broadcast(&MainEvent::OverlayAttached);
+                                }
                             }
                             // Mirrors real APT's handlePoeWindowActiveChange:
                             // PoE *regaining* focus forces any interactive
