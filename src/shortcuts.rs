@@ -324,7 +324,19 @@ async fn run(
                     "[shortcuts] toggle-overlay activated, click_through was {}",
                     click_through.get()
                 );
-                toggle_click_through(window, click_through, events)
+                // Real APT only registers hotkeys while PoE is focused (and
+                // handles overlayKey locally while the overlay is active), so
+                // activating over another app is a no-op there. Deactivating
+                // stays unconditional so the overlay can't get stuck active.
+                let poe_active = active_window
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(WindowEvent::is_path_of_exile);
+                if click_through.get() && !poe_active {
+                    println!("[shortcuts] toggle-overlay ignored: active window is not Path of Exile");
+                } else {
+                    toggle_click_through(window, click_through, events)
+                }
             }
             ActionKind::CopyItem {
                 target,
