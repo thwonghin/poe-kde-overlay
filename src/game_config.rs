@@ -95,10 +95,11 @@ fn action_key(contents: &str) -> Option<&str> {
         let line = line.trim();
         if line.starts_with('[') {
             in_section = line == "[ACTION_KEYS]";
-        } else if in_section && let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "show_advanced_item_descriptions" {
-                return Some(value.trim());
-            }
+        } else if in_section
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "show_advanced_item_descriptions"
+        {
+            return Some(value.trim());
         }
     }
     None
