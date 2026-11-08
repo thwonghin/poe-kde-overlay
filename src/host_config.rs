@@ -1,7 +1,7 @@
 // Parses the subset of the renderer's HostConfig (ipc/types.ts) we act on:
 // the user's configured hotkey list, the restoreClipboard flag,
-// windowTitle, the Client.txt options (game_log.rs) and gameConfig
-// (game_config.rs). Everything else in that payload (stashScroll/
+// windowTitle, the Client.txt options (game_log.rs), gameConfig
+// (game_config.rs) and poe2's initialDelay/hideOverlayOnBlur. Everything else in that payload (stashScroll/
 // overlayKey/logKeys/language) is
 // intentionally not modeled
 // here — serde ignores unknown fields by default, so this just picks what
@@ -27,6 +27,14 @@ pub struct HostConfig {
     pub client_log: Option<String>,
     #[serde(default, rename = "gameConfig")]
     game_config: Option<String>,
+    /// poe2 only: ms before the first clipboard poll.
+    #[serde(default, rename = "initialDelay")]
+    #[ts(optional)]
+    initial_delay: Option<u32>,
+    /// poe2 only.
+    #[serde(default, rename = "hideOverlayOnBlur")]
+    #[ts(optional)]
+    hide_overlay_on_blur: Option<bool>,
     /// poe2 only; poe1 always reads Client.txt.
     #[serde(default, rename = "readClientLog")]
     #[ts(optional)]
@@ -292,6 +300,8 @@ pub struct ParsedHostConfig {
     pub window_title: String,
     /// poe2's poe2_production_Config.ini ("" = find it).
     pub game_config: String,
+    pub initial_delay_ms: u64,
+    pub hide_overlay_on_blur: bool,
 }
 
 pub fn parse_host_config(parsed: HostConfig, logger: &Arc<Logger>) -> ParsedHostConfig {
@@ -300,6 +310,10 @@ pub fn parse_host_config(parsed: HostConfig, logger: &Arc<Logger>) -> ParsedHost
         restore_clipboard: parsed.restore_clipboard,
         window_title: parsed.window_title,
         game_config: parsed.game_config.unwrap_or_default(),
+        // HostClipboard.ts's POLL_DELAY when unset (poe1); the renderer's
+        // own clamp (settings-price-check.vue) when set.
+        initial_delay_ms: parsed.initial_delay.map_or(48, |ms| ms.clamp(5, 400)).into(),
+        hide_overlay_on_blur: parsed.hide_overlay_on_blur.unwrap_or(false),
     }
 }
 
@@ -515,6 +529,15 @@ mod tests {
         assert_eq!(key_to_evdev("F25"), None);
         assert_eq!(key_to_evdev("F"), Some(33)); // the letter, not a function key
         assert_eq!(key_to_evdev(""), None);
+    }
+
+    #[test]
+    fn poe2_options_default_for_poe1_and_clamp_like_the_renderer() {
+        let parse = |v: serde_json::Value| parse_host_config(serde_json::from_value(v).unwrap(), &test_logger());
+        let poe1 = parse(serde_json::json!({}));
+        assert_eq!((poe1.initial_delay_ms, poe1.hide_overlay_on_blur), (48, false));
+        let poe2 = parse(serde_json::json!({ "initialDelay": 9000, "hideOverlayOnBlur": true }));
+        assert_eq!((poe2.initial_delay_ms, poe2.hide_overlay_on_blur), (400, true));
     }
 
     #[test]

@@ -44,6 +44,8 @@ pub enum UiRequest {
     FocusGame,
     /// CLIENT->MAIN::user-action {action:"stash-search"}.
     StashSearch(String),
+    /// OVERLAY->MAIN::render-state: whether any widget wants showing.
+    RenderState(bool),
     /// CLIENT->MAIN::user-action {action:"quit"} (AppTray.ts listens for
     /// the same event).
     Quit,
@@ -418,7 +420,8 @@ fn handle_client_event(
         // ponytail: EE2 also flushes its FileWriter client-log channel here;
         // write-data isn't implemented, so there's nothing to flush.
         ClientEvent::ReparseLog => events.game_log(crate::game_log::Command::Reparse),
-        ClientEvent::RenderState(_) | ClientEvent::WriteData(_) => {}
+        ClientEvent::RenderState { should_show } => events.request_ui(UiRequest::RenderState(should_show)),
+        ClientEvent::WriteData(_) => {}
         ClientEvent::SaveConfig { contents, is_temporary } => {
             config.save(&contents, is_temporary, logger);
             events.broadcast(&MainEvent::ConfigChanged { contents });

@@ -515,6 +515,7 @@ impl RemoteInput {
         hotkey: &str,
         keep_mod_keys: bool,
         show_mods_key: Option<&str>,
+        initial_delay_ms: u64,
     ) -> ashpd::Result<Option<String>> {
         // Press *before* the snapshot/clear, unlike HostClipboard.ts: a
         // snapshot first reads whatever owned the clipboard before (often
@@ -545,11 +546,15 @@ impl RemoteInput {
         // CLIPBOARD_READ_TIMEOUT_MS when a read hangs.
         let start = std::time::Instant::now();
         let mut poll = ClipboardPoll::default();
+        // HostClipboard.ts: the first poll waits initialDelay, and the poll
+        // limit counts from the second one on.
+        let mut delay_ms = initial_delay_ms;
+        let limit_offset = initial_delay_ms.saturating_sub(CLIPBOARD_POLL_DELAY_MS);
         let result = loop {
             // Usually ends early: PoE taking the clipboard pings
             // `text_copied`. The fixed delay is the fallback if the portal
             // doesn't signal (upstream polls on this delay alone).
-            let delay = std::time::Duration::from_millis(CLIPBOARD_POLL_DELAY_MS);
+            let delay = std::time::Duration::from_millis(std::mem::replace(&mut delay_ms, CLIPBOARD_POLL_DELAY_MS));
             let pinged = crate::with_timeout(delay, self.text_copied.recv())
                 .await
                 .is_some_and(|r| r.is_ok());
@@ -562,7 +567,8 @@ impl RemoteInput {
                 }
             };
             let has_item_text = text.as_deref().is_some_and(looks_like_item_text);
-            match poll.step(pinged, has_item_text, start.elapsed().as_millis() as u64) {
+            let elapsed_ms = (start.elapsed().as_millis() as u64).saturating_sub(limit_offset);
+            match poll.step(pinged, has_item_text, elapsed_ms) {
                 PollStep::Found => break text,
                 PollStep::Wait => {}
                 PollStep::Recopy => {

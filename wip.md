@@ -5,6 +5,14 @@ PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
 
 ## Pending live check
 
+- **`hideOverlayOnBlur` / `initialDelay`** (poe2). With hideOverlayOnBlur
+  on, the overlay surface unmaps while PoE isn't focused (unless the
+  overlay is interactive) or no widget wants showing
+  (`Overlay::sync_window_visibility`). Check that it comes back with a
+  working click-through region, and that a price-check from the hidden
+  state isn't slow (WebKit may throttle an unmapped page). initialDelay
+  sets the clipboard poll's first wait.
+
 - **Advanced-descriptions key** (`src/game_config.rs`). poe2 copies now
   hold `show_advanced_item_descriptions` from poe2_production_Config.ini
   (gameConfig, else the game's Wine prefix, else EE2's guesses), re-read
@@ -23,9 +31,6 @@ PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
    (`FileWriter.ts`). `write-data` is ignored, so the library tab does
    nothing. `log-item` is listed as unsupported in the drift test. `re-parse-log`
    should also flush its client-log channel (`ponytail:` in `server.rs`).
-2. **Ignored EE2 settings.** `hideOverlayOnBlur` (with
-   `OVERLAY->MAIN::render-state`) and `initialDelay`, the clipboard poll's
-   first delay, are accepted but do nothing.
 
 ## Known limits (by design)
 

@@ -143,6 +143,11 @@ pub(crate) struct Overlay {
     pub restore_clipboard: Cell<bool>,
     /// The active game's gameConfig setting (game_config.rs).
     pub game_config: RefCell<String>,
+    /// The active game's initialDelay (poe2; 48 otherwise).
+    pub initial_delay_ms: Cell<u64>,
+    /// poe2's hideOverlayOnBlur, and its renderer's last render-state.
+    hide_on_blur: Cell<bool>,
+    should_show: Cell<bool>,
     /// Bumped to cancel `shortcuts::spawn_auto_close`'s poll loop
     /// (WidgetAreaTracker's removeListeners).
     pub auto_close_gen: Cell<u64>,
@@ -230,6 +235,7 @@ impl Overlay {
         }
         self.click_through.set(now_click_through);
         apply_click_through_to_surface(now_click_through, &self.window);
+        self.sync_window_visibility();
 
         // The renderer only auto-hides "hide-on-blur" popups (e.g. the
         // price-check window) in reaction to this event
@@ -240,6 +246,26 @@ impl Overlay {
             overlay: !now_click_through,
             using_hotkey: true,
         });
+    }
+
+    /// OverlayWindow.ts's syncWindowVisibility: with hideOverlayOnBlur, the
+    /// surface is unmapped unless the overlay is interactive, or PoE is
+    /// focused and some widget wants showing. Without it, always mapped.
+    pub fn sync_window_visibility(&self) {
+        let visible = !self.hide_on_blur.get()
+            || !self.click_through.get()
+            || (self.should_show.get() && self.poe_active());
+        if visible == self.window.is_visible() {
+            return;
+        }
+        debug!("[main] hideOverlayOnBlur: overlay {}", if visible { "shown" } else { "hidden" });
+        self.window.set_visible(visible);
+        if visible {
+            // Remapping resets the input region (see move_overlay_to_window_monitor).
+            let window = self.window.clone();
+            let click_through = self.click_through.get();
+            glib::idle_add_local_once(move || apply_click_through_to_surface(click_through, &window));
+        }
     }
 
     pub fn hide_price_check(&self) {
@@ -457,6 +483,9 @@ fn build_ui(app: &Application) {
         price_check_locked: Cell::new(false),
         restore_clipboard: Cell::new(false),
         game_config: RefCell::new(String::new()),
+        initial_delay_ms: Cell::new(48),
+        hide_on_blur: Cell::new(false),
+        should_show: Cell::new(true),
         auto_close_gen: Cell::new(0),
         active_window: RefCell::new(None),
         kwin_connection: RefCell::new(None),
@@ -473,6 +502,10 @@ fn build_ui(app: &Application) {
             while let Ok(request) = ui_request_rx.recv().await {
                 match request {
                     server::UiRequest::Quit => app.quit(),
+                    server::UiRequest::RenderState(should_show) => {
+                        overlay.should_show.set(should_show);
+                        overlay.sync_window_visibility();
+                    }
                     // The renderer's title-bar "x" sends focus-game instead
                     // of hiding itself locally (OverlayWindow.ts).
                     server::UiRequest::FocusGame => overlay.close_all_ui().await,
@@ -510,6 +543,9 @@ fn build_ui(app: &Application) {
                 }
                 overlay.restore_clipboard.set(config.restore_clipboard);
                 overlay.game_config.replace(config.game_config);
+                overlay.initial_delay_ms.set(config.initial_delay_ms);
+                overlay.hide_on_blur.set(config.hide_overlay_on_blur);
+                overlay.sync_window_visibility();
                 let _ = shortcuts_tx.send(config.shortcuts).await;
             }
         });
@@ -605,6 +641,7 @@ fn build_ui(app: &Application) {
                             });
                         }
                         overlay.active_window.replace(Some(w));
+                        overlay.sync_window_visibility();
                     }
                     TrackerEvent::OutputChanged(w) => {
                         // Follow PoE to another monitor without waiting for

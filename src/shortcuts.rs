@@ -431,7 +431,13 @@ async fn price_check(
             None
         };
         let copied = remote
-            .copy_item_text(overlay.restore_clipboard.get(), shortcut, keep_mod_keys, show_mods_key.as_deref())
+            .copy_item_text(
+                overlay.restore_clipboard.get(),
+                shortcut,
+                keep_mod_keys,
+                show_mods_key.as_deref(),
+                overlay.initial_delay_ms.get(),
+            )
             .await;
         Some((cursor, copied))
     };

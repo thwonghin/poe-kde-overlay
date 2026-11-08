@@ -29,10 +29,10 @@ pub enum ClientEvent {
     UserAction(UserAction),
     #[serde(rename = "CLIENT->MAIN::save-config", rename_all = "camelCase")]
     SaveConfig { contents: String, is_temporary: bool },
-    // poe2 (EE2) only. Ignored: render-state drives its opt-in
-    // hideOverlayOnBlur; write-data is its item library.
-    #[serde(rename = "OVERLAY->MAIN::render-state")]
-    RenderState(#[ts(type = "unknown")] serde::de::IgnoredAny),
+    // poe2 (EE2) only. render-state drives its opt-in hideOverlayOnBlur;
+    // write-data (its item library) is ignored.
+    #[serde(rename = "OVERLAY->MAIN::render-state", rename_all = "camelCase")]
+    RenderState { should_show: bool },
     #[serde(rename = "CLIENT->MAIN::write-data")]
     WriteData(#[ts(type = "unknown")] serde::de::IgnoredAny),
     #[serde(rename = "CLIENT->MAIN::re-parse-log")]
@@ -186,6 +186,9 @@ mod tests {
         let event: ClientEvent =
             serde_json::from_str(r#"{"name":"CLIENT->MAIN::user-action","payload":{"action":"new"}}"#).unwrap();
         assert!(matches!(event, ClientEvent::UserAction(UserAction::Unknown)));
+        let event: ClientEvent =
+            serde_json::from_str(r#"{"name":"OVERLAY->MAIN::render-state","payload":{"shouldShow":false}}"#).unwrap();
+        assert!(matches!(event, ClientEvent::RenderState { should_show: false }));
         let event: ClientEvent = serde_json::from_str(r#"{"name":"OVERLAY->MAIN::focus-game"}"#).unwrap();
         assert!(matches!(event, ClientEvent::FocusGame));
 
