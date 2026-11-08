@@ -143,6 +143,10 @@ pub struct RemoteInput {
     // sometimes owns the clipboard with only a WebKit-internal type. Starts
     // `true`: current state can't be queried, only changes observed.
     clipboard_offers_text: Rc<Cell<bool>>,
+    // Pinged when another app (PoE, after our Ctrl+C) takes the clipboard
+    // with text on it, so copy_item_text's poll wakes immediately instead
+    // of on its next fixed tick.
+    text_copied: async_channel::Receiver<()>,
     // Latest depressed-modifier mask from the EIS KeyboardModifiers events,
     // which reflect the seat (the user's real keyboard), not just our own
     // injected keys — see overlay_visibility.rs.
@@ -308,6 +312,7 @@ impl RemoteInput {
 
         // Keeps `clipboard_offers_text` in sync.
         let clipboard_offers_text: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+        let (text_copied_tx, text_copied) = async_channel::bounded(1);
         {
             let clipboard_offers_text = clipboard_offers_text.clone();
             let logger = logger.clone();
@@ -329,6 +334,10 @@ impl RemoteInput {
                 while let Some((_session, change)) = changes.next().await {
                     let offers_text = change.mime_types().iter().any(|m| m == CLIPBOARD_TEXT_MIME);
                     clipboard_offers_text.set(offers_text);
+                    if offers_text && change.session_is_owner() != Some(true) {
+                        // Full = a wake-up is already pending; one is enough.
+                        let _ = text_copied_tx.try_send(());
+                    }
                 }
             });
         }
@@ -342,6 +351,7 @@ impl RemoteInput {
             session,
             pending_clipboard_write,
             clipboard_offers_text,
+            text_copied,
             depressed_mods,
             paste_busy: Rc::new(Cell::new(false)),
             logger,
@@ -412,6 +422,9 @@ impl RemoteInput {
         // snapshot first reads whatever owned the clipboard before (often
         // not offering text) and trips the portal hang. Pressing first means
         // PoE owns the selection by the time we read.
+        // Drop a wake-up left over from an earlier copy; only one caused by
+        // this Ctrl+C should end the first wait early.
+        while self.text_copied.try_recv().is_ok() {}
         self.release_shortcut_keys(hotkey, keep_mod_keys);
         self.press_copy(keep_mod_keys);
 
@@ -433,8 +446,11 @@ impl RemoteInput {
         // CLIPBOARD_READ_TIMEOUT_MS when a read hangs.
         let start = std::time::Instant::now();
         let result = loop {
-            gtk4::glib::timeout_future(std::time::Duration::from_millis(CLIPBOARD_POLL_DELAY_MS))
-                .await;
+            // Usually ends early: PoE taking the clipboard pings
+            // `text_copied`. The fixed delay is the fallback if the portal
+            // doesn't signal (upstream polls on this delay alone).
+            let delay = std::time::Duration::from_millis(CLIPBOARD_POLL_DELAY_MS);
+            let _ = crate::with_timeout(delay, self.text_copied.recv()).await;
 
             let text = match self.read_clipboard_if_offered().await {
                 Ok(text) => text,

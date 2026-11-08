@@ -133,6 +133,27 @@ async fn apply_shortcuts(
     Ok(())
 }
 
+/// The portal has been observed emitting multiple Activated signals for one
+/// physical keypress — without this, duplicate Ctrl+C injections and proxy
+/// requests. Per id, so two different hotkeys pressed in quick succession
+/// both still fire.
+#[derive(Default)]
+struct Debounce {
+    last: HashMap<String, Instant>,
+}
+
+impl Debounce {
+    const WINDOW: Duration = Duration::from_millis(300);
+
+    fn allow(&mut self, id: &str, now: Instant) -> bool {
+        if self.last.get(id).is_some_and(|t| now.duration_since(*t) < Self::WINDOW) {
+            return false;
+        }
+        self.last.insert(id.to_string(), now);
+        true
+    }
+}
+
 async fn run(
     overlay: &Rc<Overlay>,
     shortcuts_rx: async_channel::Receiver<Vec<ShortcutAction>>,
@@ -184,24 +205,14 @@ async fn run(
         });
     }
 
-    // Debounce: the portal has been observed emitting multiple Activated
-    // signals for one physical keypress — without this, duplicate Ctrl+C
-    // injections and proxy requests. Per id, so two different hotkeys
-    // pressed in quick succession both still fire.
-    const DEBOUNCE: Duration = Duration::from_millis(300);
-    let mut last_activation: HashMap<String, Instant> = HashMap::new();
+    let mut debounce = Debounce::default();
 
     while let Some(event) = activated.next().await {
         let id = event.shortcut_id();
-        let now = Instant::now();
-        if last_activation
-            .get(id)
-            .is_some_and(|t| now.duration_since(*t) < DEBOUNCE)
-        {
+        if !debounce.allow(id, Instant::now()) {
             debug!("[shortcuts] Activated id={id} dropped by debounce");
             continue;
         }
-        last_activation.insert(id.to_string(), now);
 
         let Some((action, hotkey)) = bindings
             .borrow()
@@ -421,6 +432,56 @@ async fn price_check(
     }
 }
 
+/// Upstream's threshold is the renderer's closeThreshold (2.5 * font size,
+/// ~40px); kept at a more generous 80px so small mouse drift while reading
+/// doesn't close the popup prematurely.
+const CLOSE_THRESHOLD: f64 = 80.0;
+
+/// The price-check `holdKey` (track-area's "Ctrl"/"Alt") currently held,
+/// from the seat's depressed-modifier mask; Ctrl wins if both are.
+fn held_modifier(depressed: u32) -> &'static str {
+    if depressed & MOD_CTRL != 0 {
+        "Ctrl"
+    } else if depressed & MOD_ALT != 0 {
+        "Alt"
+    } else {
+        ""
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum TrackerStep {
+    Wait,
+    /// Hide the popup: the cursor moved away from the item.
+    Close,
+    /// Make the overlay interactive: the cursor is over the popup.
+    Activate,
+    /// Hand control back to the game: the cursor left the interactive popup.
+    ReturnToGame,
+}
+
+/// One poll of WidgetAreaTracker.ts's mousemove handler (see
+/// `spawn_auto_close`). `distance` is from where the item was copied.
+fn tracker_step(click_through: bool, holding: bool, inside: bool, distance: f64) -> TrackerStep {
+    if click_through && !holding {
+        if distance > CLOSE_THRESHOLD {
+            TrackerStep::Close
+        } else {
+            TrackerStep::Wait
+        }
+    } else if inside {
+        if click_through {
+            TrackerStep::Activate
+        } else {
+            TrackerStep::Wait
+        }
+    } else if !click_through {
+        TrackerStep::ReturnToGame
+    } else {
+        TrackerStep::Wait
+    }
+}
+
 /// Port of main/src/windowing/WidgetAreaTracker.ts's mousemove handler,
 /// polled via the same one-shot KWin cursor query used to capture `from`
 /// (we have no continuous mousemove stream on Wayland):
@@ -433,15 +494,10 @@ async fn price_check(
 /// ponytail: upstream's mousedown-in-area handler is skipped; a click
 /// inside the area is always preceded by a move there, which this covers.
 fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
-    // Upstream's threshold is the renderer's closeThreshold (2.5 * font
-    // size, ~40px); kept at a more generous 80px so small mouse drift while
-    // reading doesn't close it prematurely.
-    //
     // POLL_INTERVAL: each tick is a full KWin loadScript/run/unloadScript
     // round trip plus temp-file I/O; 40ms made the whole compositor feel
     // laggy. workspace.cursorPosChanged (push-based) doesn't fire on real
     // mouse movement on this KWin version, so polling it is.
-    const CLOSE_THRESHOLD: f64 = 80.0;
     const POLL_INTERVAL: Duration = Duration::from_millis(80);
 
     // Mirrors WidgetAreaTracker's removeListeners() on every new item-text:
@@ -478,14 +534,9 @@ fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
 
             let track = overlay.events.track_area();
             let mods = overlay.remote().map_or(0, |r: Rc<RemoteInput>| r.depressed_mods());
-            let modifier = if mods & MOD_CTRL != 0 {
-                "Ctrl"
-            } else if mods & MOD_ALT != 0 {
-                "Alt"
-            } else {
-                ""
-            };
-            let holding = track.as_ref().is_some_and(|t| t.hold_key == modifier);
+            let holding = track
+                .as_ref()
+                .is_some_and(|t| t.hold_key == held_modifier(mods));
             // `area` is relative to the overlay window, which covers its
             // monitor; the cursor is in global compositor coordinates.
             let (ox, oy) = overlay.window.monitor().map_or((0.0, 0.0), |m| {
@@ -496,26 +547,74 @@ fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
                 .as_ref()
                 .is_some_and(|t| t.area.contains(x - ox, y - oy));
 
-            if overlay.click_through.get() && !holding {
-                let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
-                if distance > CLOSE_THRESHOLD {
+            let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
+            match tracker_step(overlay.click_through.get(), holding, inside, distance) {
+                TrackerStep::Wait => {}
+                TrackerStep::Close => {
                     debug!("[shortcuts] auto-close: cursor moved {distance:.0}px");
                     overlay.hide_price_check();
                     return;
                 }
-            } else if inside {
-                if overlay.click_through.get() {
+                TrackerStep::Activate => {
                     debug!("[shortcuts] popup tracker: cursor entered popup, activating overlay");
                     overlay.set_click_through(false);
                     // Same state as a locked popup: the overlay owns input,
                     // so the next hotkey press closes instead of copying.
                     overlay.price_check_locked.set(true);
                 }
-            } else if !overlay.click_through.get() {
-                debug!("[shortcuts] popup tracker: cursor left popup, returning to game");
-                overlay.close_all_ui().await;
-                return;
+                TrackerStep::ReturnToGame => {
+                    debug!("[shortcuts] popup tracker: cursor left popup, returning to game");
+                    overlay.close_all_ui().await;
+                    return;
+                }
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debounce_is_per_hotkey() {
+        let mut d = Debounce::default();
+        let t = Instant::now();
+        assert!(d.allow("a", t));
+        assert!(!d.allow("a", t + Duration::from_millis(100)), "duplicate signal");
+        assert!(d.allow("b", t + Duration::from_millis(100)), "other hotkey");
+        assert!(d.allow("a", t + Duration::from_millis(400)), "after the window");
+    }
+
+    #[test]
+    fn held_modifier_prefers_ctrl() {
+        assert_eq!(held_modifier(0), "");
+        assert_eq!(held_modifier(MOD_ALT), "Alt");
+        assert_eq!(held_modifier(MOD_CTRL), "Ctrl");
+        assert_eq!(held_modifier(MOD_CTRL | MOD_ALT), "Ctrl");
+        assert_eq!(held_modifier(crate::remote_input::MOD_SHIFT), "");
+    }
+
+    #[test]
+    fn tracker_closes_unpinned_popup_once_cursor_moves_away() {
+        assert_eq!(tracker_step(true, false, false, 10.0), TrackerStep::Wait);
+        assert_eq!(tracker_step(true, false, false, CLOSE_THRESHOLD + 1.0), TrackerStep::Close);
+        // Not holding: moving onto the popup still counts as moving away
+        // (upstream only pins via holdKey or an interactive overlay).
+        assert_eq!(tracker_step(true, false, true, CLOSE_THRESHOLD + 1.0), TrackerStep::Close);
+    }
+
+    #[test]
+    fn tracker_hold_to_pin_and_hover_to_interact() {
+        // Holding the holdKey: never closes on distance.
+        assert_eq!(tracker_step(true, true, false, 1000.0), TrackerStep::Wait);
+        // ... and entering the popup makes it interactive.
+        assert_eq!(tracker_step(true, true, true, 1000.0), TrackerStep::Activate);
+        // Interactive and still over it: stay.
+        assert_eq!(tracker_step(false, false, true, 1000.0), TrackerStep::Wait);
+        assert_eq!(tracker_step(false, true, true, 1000.0), TrackerStep::Wait);
+        // Interactive and the cursor left: back to the game.
+        assert_eq!(tracker_step(false, false, false, 0.0), TrackerStep::ReturnToGame);
+        assert_eq!(tracker_step(false, true, false, 0.0), TrackerStep::ReturnToGame);
+    }
 }
