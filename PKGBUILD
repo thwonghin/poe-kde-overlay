@@ -36,6 +36,14 @@ build() {
     cargo build --release --locked
 }
 
+check() {
+  cd "$pkgname"
+  # Same -flto=auto stripping as build(): the test binary links ring too.
+  # --release reuses build()'s compiled dependencies.
+  CFLAGS="${CFLAGS/-flto=auto/}" CXXFLAGS="${CXXFLAGS/-flto=auto/}" \
+    cargo test --release --locked
+}
+
 package() {
   cd "$pkgname"
   install -Dm755 target/release/apt-kwin-overlay "$pkgdir/usr/bin/apt-kwin-overlay"

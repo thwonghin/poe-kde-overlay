@@ -420,6 +420,11 @@ async fn price_check(
         }),
     );
     overlay.price_check_open.set(true);
+    // Every copy-item stops the previous popup tracker (Shortcuts.ts's
+    // areaTracker.removeListeners() before item-text). Otherwise an
+    // unlocked popup's tracker would see the overlay go interactive for a
+    // new locked popup, find the cursor outside its old area, and close it.
+    overlay.auto_close_gen.set(overlay.auto_close_gen.get() + 1);
     // Mirrors Shortcuts.ts's `action.focusOverlay && this.overlay.wasUsedRecently`:
     // if a plain browser tab (tray's "Open in Browser") got the item-text,
     // there's no overlay popup to interact with, so don't steal input from
@@ -427,7 +432,10 @@ async fn price_check(
     if focus_overlay && overlay.events.overlay_was_used_recently() {
         overlay.set_click_through(false);
         overlay.price_check_locked.set(true);
-    } else {
+    } else if target == "price-check" {
+        // Upstream only tracks once the popup reports its area, which only
+        // the price-check popup does (PriceCheckWindow.vue). open-wiki,
+        // open-poedb, … show no popup, so there is nothing to auto-close.
         spawn_auto_close(overlay.clone(), x, y);
     }
 }
@@ -495,10 +503,11 @@ fn tracker_step(click_through: bool, holding: bool, inside: bool, distance: f64)
 /// inside the area is always preceded by a move there, which this covers.
 fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
     // POLL_INTERVAL: each tick is a full KWin loadScript/run/unloadScript
-    // round trip plus temp-file I/O; 40ms made the whole compositor feel
-    // laggy. workspace.cursorPosChanged (push-based) doesn't fire on real
+    // round trip, measured at ~1ms (median, 50 queries). An earlier 40ms
+    // attempt felt laggy compositor-wide; if that comes back, return to
+    // 80ms. workspace.cursorPosChanged (push-based) doesn't fire on real
     // mouse movement on this KWin version, so polling it is.
-    const POLL_INTERVAL: Duration = Duration::from_millis(80);
+    const POLL_INTERVAL: Duration = Duration::from_millis(40);
 
     // Mirrors WidgetAreaTracker's removeListeners() on every new item-text:
     // a newer check supersedes this loop, or it would close the new popup
