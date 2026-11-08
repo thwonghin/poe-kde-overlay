@@ -167,6 +167,14 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &Application) {
+    // Single instance (real main.ts's requestSingleInstanceLock): GApplication
+    // is already unique per APP_ID over D-Bus — a second launch just asks
+    // this process to activate again and exits. Without this guard that
+    // re-activation built a second overlay, server and portal sessions here.
+    if !app.windows().is_empty() {
+        println!("[main] already running; ignoring second launch");
+        return;
+    }
     let window = ApplicationWindow::builder()
         .application(app)
         .title("apt-kwin-overlay")

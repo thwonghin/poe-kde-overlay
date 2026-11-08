@@ -18,7 +18,8 @@ keys before injecting Ctrl+C, Alt-hold-to-hide (`overlay_visibility.rs`),
 and the price-check popup tracker's hold-to-pin / hover-to-interact plus
 `keepModKeys` (`spawn_auto_close` in `shortcuts.rs`), and the
 paste-in-chat / stash-search hotkeys plus the stash-search widget's
-`user-action` click (`chat_sequence`/`paste_with_taps` in `remote_input.rs`) —
+`user-action` click (`chat_sequence`/`paste_with_taps` in `remote_input.rs`),
+and a single-instance guard (`build_ui` in `main.rs`) —
 have been removed from this list to keep it focused on what's actually
 still open. See git history for how each landed; the reasoning behind
 non-obvious decisions (e.g. why hotkeys are now configured in KDE System
@@ -65,10 +66,9 @@ keydown/keyup events.
   "advanced item description" keybind) — as of PoE 3.29, `Shortcuts.ts`
   hardcodes `showModsKey = 'Ctrl'` and ignores whatever `GameConfig` found
   anyway. Close to dead code in the real app too now; not worth porting.
-## 7. Small differences: proxy cookies, single-instance lock
+## 7. Small difference: proxy cookies
 
-Neither looks urgent; noting them so they don't get re-discovered from
-scratch later.
+Not urgent; noting it so it doesn't get re-discovered from scratch later.
 
 - **Proxy doesn't forward `Set-Cookie` / has no outbound cookie jar.** Real
   `proxy.ts` uses Electron's `net.request` with `useSessionCookies: true` —
@@ -87,20 +87,11 @@ scratch later.
   real APT's proxy, worth remembering if GGG-side requests ever start
   behaving inconsistently (e.g. increasingly aggressive Cloudflare
   challenges from what looks like a cookie-less client on every request).
-- **No single-instance lock.** Real `main.ts` calls
-  `app.requestSingleInstanceLock()` and exits immediately if another
-  instance already holds it. `main.rs` has no equivalent — running the
-  binary twice spawns two overlay windows, two local HTTP/WS servers, and
-  two competing `ashpd` `GlobalShortcuts`/`RemoteDesktop` sessions with no
-  guard against it. Minor (accidental double-launch, not a real usage
-  path), but a one-time `flock`-style lock file (e.g. under
-  `xdg::data_dir()`) would close it cheaply if it ever bites someone.
 
 ## Suggested order if picked back up
 
 1. §4 (`logKeys`) — low value with only modifier transitions to log.
-2. §7 — proxy cookies and the single-instance lock have no confirmed
-   symptom; pick up opportunistically.
+2. §7 — proxy cookies have no confirmed symptom; pick up opportunistically.
 
 (§1, stash scroll-wheel navigation, is deliberately left off this list —
 needs real window-bounds tracking plus scroll-event capture we don't have
@@ -130,6 +121,6 @@ the real APT icon already vendored at `renderer/dist/icon.png`) — needed
 for `ashpd::register_host_app` to succeed on KDE, which looks up an
 installed app matching `APP_ID` via the portal's Registry interface.
 
-**Remaining**: nothing structural. Two small, low-priority items — see §7
-above (no single-instance lock; proxy doesn't forward `Set-Cookie`/has no
-outbound cookie jar). Neither has a confirmed real-world symptom.
+**Remaining**: nothing structural. One small, low-priority item — see §7
+above (proxy doesn't forward `Set-Cookie`/has no outbound cookie jar). No
+confirmed real-world symptom.
