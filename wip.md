@@ -3,34 +3,14 @@
 PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
 `bf410c9`). Price-check works. These are what's still missing or assumed.
 
-## Pending live check
+## Gaps
 
-- **Item library** (`src/library.rs`). With Settings → General →
-  experimental features → Item Data Collection on, a library-widget
-  session writes `<name>.csv` (in libraryOutputPath, else
-  `~/.local/share/poe-kde-overlay/poe2/csv-data/`) with one row per
-  "Copy item (log-item)" press (bind it in KDE), and parsed Client.txt
-  events go to `client-log.ndjson`.
-
-- **`hideOverlayOnBlur` / `initialDelay`** (poe2). With hideOverlayOnBlur
-  on, the overlay surface unmaps while PoE isn't focused (unless the
-  overlay is interactive) or no widget wants showing
-  (`Overlay::sync_window_visibility`). Check that it comes back with a
-  working click-through region, and that a price-check from the hidden
-  state isn't slow (WebKit may throttle an unmapped page). initialDelay
-  sets the clipboard poll's first wait.
-
-- **Advanced-descriptions key** (`src/game_config.rs`). poe2 copies now
-  hold `show_advanced_item_descriptions` from poe2_production_Config.ini
-  (gameConfig, else the game's Wine prefix, else EE2's guesses), re-read
-  on every copy. Check the Log tab names the right ini, and that a
-  rebound key still copies tiers/ranges.
-
-- **`search-same-priced` hotkey.** EE2-only copy-item target, now in
-  `extra_registerable_actions` (`src/host_config.rs`) with a drift test
-  (`every_vendor_copy_item_target_is_registerable`). Check that "Copy item
-  (search-same-priced)" shows up in System Settings → Shortcuts →
-  poe-kde-overlay, bind it, and try it in PoE2.
+1. **poe2's "Filter by" option is hidden.** EE2's Item info tab
+   (`settings-item-check.vue`) puts search-same-priced's Price Only /
+   Price and Item select on the same row as its hotkey field.
+   `src/hotkey_ui_info.js` hides that whole tab behind the KDE banner
+   (it assumes the tab is hotkey rows only, true for poe1), so the
+   setting can't be changed.
 
 ## Known limits (by design)
 
