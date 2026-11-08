@@ -48,9 +48,14 @@ pub enum ActionKind {
     // this (stopwatch start/stop/reset, delve-grid toggle) — no input
     // injection involved.
     TriggerEvent { target: String },
-    // ocr-text / stash-search / paste-in-chat / test-only —
-    // not implemented yet (need EIS text-injection + clipboard-write
-    // primitives that don't exist in remote_input.rs), parsed but inert.
+    // text-box.ts: clipboard write + key-tap sequences (remote_input.rs).
+    PasteInChat {
+        text: String,
+        #[serde(default)]
+        send: bool,
+    },
+    StashSearch { text: String },
+    // ocr-text (Windows-only upstream) / test-only — parsed but inert.
     #[serde(other)]
     Unsupported,
 }
@@ -278,6 +283,13 @@ pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
 /// action. Keying only on action type + target + focus_overlay avoids that:
 /// the same action always maps to the same id no matter what key is
 /// currently assigned to it.
+/// Stable across runs and Rust versions, unlike `DefaultHasher`.
+fn fnv1a(text: &str) -> u64 {
+    text.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ byte as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
 pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
     let slug = |s: &str| {
         s.chars()
@@ -297,6 +309,11 @@ pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
             focus_overlay,
         } => Some(format!("copy-item-{}-{}", slug(target), focus_overlay)),
         ActionKind::TriggerEvent { target } => Some(format!("trigger-event-{}", slug(target))),
+        // Text can be anything (incl. non-ASCII), so hash rather than slug.
+        ActionKind::PasteInChat { text, send } => {
+            Some(format!("paste-in-chat-{send}-{:016x}", fnv1a(text)))
+        }
+        ActionKind::StashSearch { text } => Some(format!("stash-search-{:016x}", fnv1a(text))),
         ActionKind::Unsupported => None,
     }
 }
@@ -358,6 +375,8 @@ mod tests {
                 { "shortcut": "Shift + Space", "action": { "type": "toggle-overlay" } },
                 { "shortcut": "Ctrl + Shift + S", "action": { "type": "stash-search", "text": "foo" } },
                 { "shortcut": "Ctrl + T", "action": { "type": "trigger-event", "target": "delve-grid" } },
+                { "shortcut": "F5", "action": { "type": "paste-in-chat", "text": "/hideout", "send": true } },
+                { "shortcut": "Ctrl + O", "action": { "type": "ocr-text", "target": "heist-gems" } },
             ],
             "restoreClipboard": true,
             "clientLog": null,
@@ -370,17 +389,25 @@ mod tests {
         });
 
         let parsed = parse_host_config(&payload, &test_logger());
-        assert_eq!(parsed.shortcuts.len(), 4);
+        assert_eq!(parsed.shortcuts.len(), 6);
         assert!(matches!(
             parsed.shortcuts[0].action,
             ActionKind::CopyItem { ref target, focus_overlay: false } if target == "price-check"
         ));
         assert!(matches!(parsed.shortcuts[1].action, ActionKind::ToggleOverlay));
-        assert!(matches!(parsed.shortcuts[2].action, ActionKind::Unsupported));
+        assert!(matches!(
+            parsed.shortcuts[2].action,
+            ActionKind::StashSearch { ref text } if text == "foo"
+        ));
         assert!(matches!(
             parsed.shortcuts[3].action,
             ActionKind::TriggerEvent { ref target } if target == "delve-grid"
         ));
+        assert!(matches!(
+            parsed.shortcuts[4].action,
+            ActionKind::PasteInChat { ref text, send: true } if text == "/hideout"
+        ));
+        assert!(matches!(parsed.shortcuts[5].action, ActionKind::Unsupported));
         assert!(parsed.restore_clipboard);
         assert_eq!(parsed.window_title, "Path of Exile");
     }

@@ -16,7 +16,9 @@ resetting overlay state when PoE regains OS focus, and a tray icon (via
 toggle-overlay activation on PoE focus, releasing the hotkey's own
 keys before injecting Ctrl+C, Alt-hold-to-hide (`overlay_visibility.rs`),
 and the price-check popup tracker's hold-to-pin / hover-to-interact plus
-`keepModKeys` (`spawn_auto_close` in `shortcuts.rs`) —
+`keepModKeys` (`spawn_auto_close` in `shortcuts.rs`), and the
+paste-in-chat / stash-search hotkeys plus the stash-search widget's
+`user-action` click (`chat_sequence`/`paste_with_taps` in `remote_input.rs`) —
 have been removed from this list to keep it focused on what's actually
 still open. See git history for how each landed; the reasoning behind
 non-obvious decisions (e.g. why hotkeys are now configured in KDE System
@@ -37,24 +39,6 @@ We have no scroll-event capture at all (libei/EIS only ever *emits* input for
 us, doesn't capture the user's real mouse wheel), and no window-bounds-based
 region logic. Not attempted. The `stashScroll` config field isn't parsed
 either — relevant if this is ever picked up.
-
-## 2. Hotkey actions not yet bound: paste-in-chat, stash-search
-
-Parsed as `ActionKind::Unsupported` (inert) in `host_config.rs`. Closer than
-it looks: `main/src/shortcuts/text-box.ts`'s `typeInChat`/`stashSearch` are
-just `uiohook`-style key-tap sequences (`V`/`Ctrl+V`, `Enter`, `Home`,
-`Delete`, `Ctrl+A`, `Ctrl+F`, `ArrowUp`, `Escape`) wrapped in a
-clipboard-save/restore. `remote_input.rs::press_keys` is already a generic
-`&[(keycode, KeyState)]` injector (`press_ctrl_c` just calls it with two
-keys), and the clipboard-write wrapper these sequences need
-(`RemoteInput::write_clipboard_text`, via `ashpd`'s `Clipboard` portal's
-`set_selection`/`selection_write`/`selection_write_done`) already exists,
-built for the clipboard-restore work, and `remote_input.rs::key_to_evdev`
-already maps every renderer key name to an evdev keycode. Remaining work is
-just a generic multi-key-tap helper — no new portal capability needed. The same `stashSearch` helper also backs
-`CLIENT->MAIN::user-action {action:"stash-search"}` (the stash-search
-widget's click path, `WidgetStashSearch.vue`), which `server.rs` currently
-ignores — wire both when this lands.
 
 ## 4. No `logKeys` debug logging
 
@@ -121,14 +105,10 @@ scratch later.
 
 ## Suggested order if picked back up
 
-1. §2 (paste-in-chat/stash-search hotkey actions) — needs a generic
-   multi-tap helper (`key_to_evdev` covers the keycodes); the clipboard-write wrapper it
-   also needs already exists (`RemoteInput::write_clipboard_text`) and can
-   be reused as-is.
-2. §4 (`logKeys`) — low value with only modifier transitions to log.
-3. §5 (game log watcher) — biggest standalone feature, independent of
+1. §4 (`logKeys`) — low value with only modifier transitions to log.
+2. §5 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
-4. §7 — proxy cookies and the single-instance lock have no confirmed
+3. §7 — proxy cookies and the single-instance lock have no confirmed
    symptom; pick up opportunistically.
 
 (§1, stash scroll-wheel navigation, is deliberately left off this list —

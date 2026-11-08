@@ -18,7 +18,7 @@ use crate::host_config::{
 use crate::kwin_tracker::WindowEvent;
 use crate::logger::Logger;
 use crate::remote_input::{MOD_ALT, MOD_CTRL, RemoteInput};
-use crate::server::EventBus;
+use crate::server::{EventBus, UiRequest};
 use crate::{set_click_through, toggle_click_through};
 
 pub fn spawn(
@@ -29,12 +29,22 @@ pub fn spawn(
     events: Arc<EventBus>,
     logger: Arc<Logger>,
     active_window: Rc<RefCell<Option<WindowEvent>>>,
-    focus_game_rx: async_channel::Receiver<()>,
+    ui_request_rx: async_channel::Receiver<UiRequest>,
     shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
     restore_clipboard_rx: async_channel::Receiver<bool>,
     price_check_open: Rc<Cell<bool>>,
     price_check_locked: Rc<Cell<bool>>,
 ) {
+    let restore_clipboard: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    {
+        let restore_clipboard = restore_clipboard.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(value) = restore_clipboard_rx.recv().await {
+                restore_clipboard.set(value);
+            }
+        });
+    }
+
     {
         let window = window.clone();
         let click_through = click_through.clone();
@@ -42,12 +52,15 @@ pub fn spawn(
         let price_check_open = price_check_open.clone();
         let price_check_locked = price_check_locked.clone();
         let kwin_connection = kwin_connection.clone();
+        let remote_input = remote_input.clone();
+        let logger = logger.clone();
+        let restore_clipboard = restore_clipboard.clone();
         glib::spawn_future_local(async move {
-            // The renderer's own title-bar "x" button sends this instead of
-            // just hiding itself locally (main/src/windowing/OverlayWindow.ts's
-            // assertGameActive handler for the same event) — it expects us to
-            // actually restore click-through and close whatever's open.
-            while focus_game_rx.recv().await.is_ok() {
+            while let Ok(request) = ui_request_rx.recv().await {
+                // Both are assertGameActive first: the renderer's title-bar
+                // "x" button sends focus-game instead of just hiding itself
+                // locally (OverlayWindow.ts), and text-box.ts's stashSearch
+                // hands focus back to the game before typing into it.
                 close_all_ui(
                     &window,
                     &click_through,
@@ -57,16 +70,17 @@ pub fn spawn(
                     &kwin_connection,
                 )
                 .await;
-            }
-        });
-    }
-
-    let restore_clipboard: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    {
-        let restore_clipboard = restore_clipboard.clone();
-        glib::spawn_future_local(async move {
-            while let Ok(value) = restore_clipboard_rx.recv().await {
-                restore_clipboard.set(value);
+                if let UiRequest::StashSearch(text) = request {
+                    paste_action(
+                        &ActionKind::StashSearch { text },
+                        "",
+                        &kwin_connection,
+                        &remote_input,
+                        &logger,
+                        restore_clipboard.get(),
+                    )
+                    .await;
+                }
             }
         });
     }
@@ -185,6 +199,8 @@ async fn apply_shortcuts(
                     focus_overlay: false,
                 } => format!("Copy item ({target})"),
                 ActionKind::TriggerEvent { target } => format!("Widget action ({target})"),
+                ActionKind::PasteInChat { text, .. } => format!("Paste in chat ({text})"),
+                ActionKind::StashSearch { text } => format!("Stash search ({text})"),
                 ActionKind::Unsupported => unreachable!(),
             };
             // Empty shortcut (extra_registerable_actions' unset-by-default
@@ -366,11 +382,70 @@ async fn run(
             ActionKind::TriggerEvent { target } => {
                 events.broadcast("MAIN->CLIENT::widget-action", json!({ "target": target }))
             }
+            ActionKind::PasteInChat { .. } | ActionKind::StashSearch { .. } => {
+                // Real APT has every hotkey unregistered while the overlay
+                // is interactive; typing into PoE then would be surprising.
+                if click_through.get() {
+                    paste_action(
+                        &action.action,
+                        &action.shortcut,
+                        kwin_connection,
+                        remote_input,
+                        logger,
+                        restore_clipboard.get(),
+                    )
+                    .await
+                }
+            }
             ActionKind::Unsupported => {}
         }
     }
 
     Ok(())
+}
+
+/// paste-in-chat / stash-search (text-box.ts), only into a PoE window
+/// confirmed focused right now: a stray Enter or Ctrl+A landing in another
+/// app is worse than a dropped press. Bounded like price_check, since this
+/// runs inline in the hotkey loop.
+async fn paste_action(
+    action: &ActionKind,
+    hotkey: &str,
+    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
+    remote_input: &Rc<RefCell<Option<RemoteInput>>>,
+    logger: &Arc<Logger>,
+    restore_clipboard: bool,
+) {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let work = std::pin::pin!(async {
+        let connection = kwin_connection.borrow().clone()?;
+        let (_, _, poe_active) = crate::kwin_tracker::query_cursor_pos(&connection).await.ok()?;
+        if !poe_active {
+            return None;
+        }
+        let remote_ref = remote_input.borrow();
+        let remote = remote_ref.as_ref()?;
+        match action {
+            ActionKind::PasteInChat { text, send } => {
+                remote.type_in_chat(text, *send, hotkey, restore_clipboard).await
+            }
+            ActionKind::StashSearch { text } => {
+                remote.stash_search(text, hotkey, restore_clipboard).await
+            }
+            _ => {}
+        }
+        Some(())
+    });
+    let timeout = std::pin::pin!(glib::timeout_future(TIMEOUT));
+    let msg = match futures_util::future::select(work, timeout).await {
+        futures_util::future::Either::Left((Some(()), _)) => return,
+        futures_util::future::Either::Left((None, _)) => {
+            "[shortcuts] paste skipped: Path of Exile not focused (or input not ready)"
+        }
+        futures_util::future::Either::Right(_) => "[shortcuts] paste timed out (portal or KWin call hung)",
+    };
+    eprintln!("{msg}");
+    logger.write(msg);
 }
 
 thread_local! {
@@ -577,6 +652,7 @@ async fn price_check(
 /// - otherwise, cursor inside the popup's area (OVERLAY->MAIN::track-area):
 ///   make the overlay interactive (hold-to-pin / hover-to-interact);
 /// - otherwise, if interactive: hand control back to the game and stop.
+///
 /// ponytail: upstream's mousedown-in-area handler is skipped; a click
 /// inside the area is always preceded by a move there, which this covers.
 fn spawn_auto_close(

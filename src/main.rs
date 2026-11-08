@@ -484,7 +484,7 @@ fn build_ui(app: &Application) {
         let events = backend.events.clone();
         let logger = backend.logger.clone();
         let active_window = active_window.clone();
-        let focus_game_rx = backend.focus_game_rx.clone();
+        let ui_request_rx = backend.ui_request_rx.clone();
         let shortcut_config_rx = backend.shortcut_config_rx.clone();
         let restore_clipboard_rx = backend.restore_clipboard_rx.clone();
         let price_check_open = price_check_open.clone();
@@ -528,7 +528,7 @@ fn build_ui(app: &Application) {
                 events,
                 logger,
                 active_window,
-                focus_game_rx,
+                ui_request_rx,
                 shortcut_config_rx,
                 restore_clipboard_rx,
                 price_check_open,

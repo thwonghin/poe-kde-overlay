@@ -31,6 +31,52 @@ pub const MOD_SHIFT: u32 = 1 << 0;
 pub const MOD_CTRL: u32 = 1 << 2;
 pub const MOD_ALT: u32 = 1 << 3;
 
+/// One key tap, optionally with Ctrl held (uIOhook.keyTap(key, [Ctrl])).
+type Tap = (bool, &'static str);
+
+// text-box.ts's AUTO_CLEAR: chat prefixes PoE clears the input for itself.
+const AUTO_CLEAR: &[char] = &['#', '%', '@', '$', '&', '/'];
+const PLACEHOLDER_LAST: &str = "@last";
+
+/// Port of text-box.ts's typeInChat: what to put on the clipboard, then
+/// which keys to tap. `@last` as a prefix/suffix replies to the last
+/// whisper (Ctrl+Enter reopens chat with the last whisper target).
+fn chat_sequence(text: &str, send: bool) -> (String, Vec<Tap>) {
+    let mut taps = Vec::new();
+    let clip = if text.starts_with(PLACEHOLDER_LAST) {
+        taps.push((true, "Enter"));
+        text.chars().skip(PLACEHOLDER_LAST.len() + 1).collect()
+    } else if let Some(rest) = text.strip_suffix(PLACEHOLDER_LAST) {
+        // Home twice: the first one focuses the input on a controller.
+        taps.extend([(true, "Enter"), (false, "Home"), (false, "Home"), (false, "Delete")]);
+        rest.to_string()
+    } else {
+        taps.push((false, "Enter"));
+        if !text.starts_with(AUTO_CLEAR) {
+            taps.push((true, "A"));
+        }
+        text.to_string()
+    };
+    taps.push((true, "V"));
+    if send {
+        // Send, then reopen chat and step back to restore the last chat.
+        taps.extend([
+            (false, "Enter"),
+            (false, "Enter"),
+            (false, "ArrowUp"),
+            (false, "ArrowUp"),
+            (false, "Escape"),
+        ]);
+    }
+    (clip, taps)
+}
+
+/// Port of text-box.ts's stashSearch key sequence.
+const STASH_SEARCH_TAPS: &[Tap] = &[(true, "F"), (true, "V"), (false, "Enter")];
+
+// HostClipboard.ts's RESTORE_AFTER.
+const RESTORE_AFTER_MS: u64 = 120;
+
 fn is_mod_key(key: &str) -> bool {
     matches!(key, "Ctrl" | "Shift" | "Alt")
 }
@@ -200,6 +246,9 @@ pub struct RemoteInput {
     // which reflect the seat (the user's real keyboard), not just our own
     // injected keys — see overlay_visibility.rs.
     depressed_mods: Rc<Cell<u32>>,
+    // HostClipboard.restoreShortly's isRestored throttle: drops a paste
+    // request while the previous one's restore is still pending.
+    paste_busy: Rc<Cell<bool>>,
     logger: Arc<Logger>,
 }
 
@@ -414,6 +463,7 @@ impl RemoteInput {
             pending_clipboard_write,
             clipboard_offers_text,
             depressed_mods,
+            paste_busy: Rc::new(Cell::new(false)),
             logger,
         })
     }
@@ -602,6 +652,69 @@ impl RemoteInput {
             .await
     }
 
+    pub async fn type_in_chat(&self, text: &str, send: bool, hotkey: &str, restore: bool) {
+        let (clip, taps) = chat_sequence(text, send);
+        self.paste_with_taps(&clip, &taps, hotkey, restore).await;
+    }
+
+    pub async fn stash_search(&self, text: &str, hotkey: &str, restore: bool) {
+        self.paste_with_taps(text, STASH_SEARCH_TAPS, hotkey, restore).await;
+    }
+
+    /// Port of HostClipboard.restoreShortly around a key-tap sequence:
+    /// put `clip` on the clipboard, tap `taps`, and restore the previous
+    /// clipboard RESTORE_AFTER_MS later if `restore` (restoreClipboard).
+    async fn paste_with_taps(&self, clip: &str, taps: &[Tap], hotkey: &str, restore: bool) {
+        if self.paste_busy.replace(true) {
+            println!("[remote_input] paste dropped: previous one still restoring");
+            return;
+        }
+        // Reset even if the caller's timeout drops this future mid-way.
+        struct Busy(Rc<Cell<bool>>);
+        impl Drop for Busy {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let _busy = Busy(self.paste_busy.clone());
+
+        let saved = if restore {
+            self.read_clipboard_if_offered().await.ok().flatten()
+        } else {
+            None
+        };
+        if let Err(err) = self.write_clipboard_text(clip).await {
+            let msg = format!("[remote_input] paste: clipboard write failed: {err}");
+            eprintln!("{msg}");
+            self.logger.write(&msg);
+            return;
+        }
+
+        use ei::keyboard::KeyState::{Press, Released};
+        self.release_shortcut_keys(hotkey, false);
+        for &(ctrl, key) in taps {
+            let Some(code) = key_to_evdev(key) else { continue };
+            let mut seq = Vec::with_capacity(4);
+            if ctrl {
+                seq.push((KEY_LEFTCTRL, Press));
+            }
+            seq.extend([(code, Press), (code, Released)]);
+            if ctrl {
+                seq.push((KEY_LEFTCTRL, Released));
+            }
+            self.press_keys(&seq);
+        }
+
+        gtk4::glib::timeout_future(std::time::Duration::from_millis(RESTORE_AFTER_MS)).await;
+        if restore
+            && let Err(err) = self.write_clipboard_text(saved.as_deref().unwrap_or("")).await
+        {
+            let msg = format!("[remote_input] paste: clipboard restore failed: {err}");
+            eprintln!("{msg}");
+            self.logger.write(&msg);
+        }
+    }
+
     pub fn depressed_mods(&self) -> u32 {
         self.depressed_mods.get()
     }
@@ -667,6 +780,44 @@ impl RemoteInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_sequence_matches_text_box_ts() {
+        let (clip, taps) = chat_sequence("/hideout", true);
+        assert_eq!(clip, "/hideout");
+        assert_eq!(
+            taps,
+            vec![
+                (false, "Enter"),
+                (true, "V"),
+                (false, "Enter"),
+                (false, "Enter"),
+                (false, "ArrowUp"),
+                (false, "ArrowUp"),
+                (false, "Escape"),
+            ]
+        );
+
+        // Not auto-cleared by PoE -> select-all first so V replaces it.
+        let (clip, taps) = chat_sequence("ty", false);
+        assert_eq!(clip, "ty");
+        assert_eq!(taps, vec![(false, "Enter"), (true, "A"), (true, "V")]);
+
+        let (clip, taps) = chat_sequence("@last ty for trade", false);
+        assert_eq!(clip, "ty for trade");
+        assert_eq!(taps, vec![(true, "Enter"), (true, "V")]);
+
+        let (clip, taps) = chat_sequence("/invite @last", false);
+        assert_eq!(clip, "/invite ");
+        assert_eq!(
+            taps,
+            vec![(true, "Enter"), (false, "Home"), (false, "Home"), (false, "Delete"), (true, "V")]
+        );
+
+        for (_, key) in chat_sequence("x", true).1.iter().chain(STASH_SEARCH_TAPS) {
+            assert!(key_to_evdev(key).is_some(), "{key}");
+        }
+    }
 
     #[test]
     fn key_to_evdev_matches_input_event_codes() {

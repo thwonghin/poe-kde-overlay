@@ -61,6 +61,15 @@ impl Rect {
     }
 }
 
+/// Renderer requests the GTK main loop has to act on (it owns the window,
+/// click-through and input-injection state).
+pub enum UiRequest {
+    /// OVERLAY->MAIN::focus-game (the title-bar "x"): assertGameActive.
+    FocusGame,
+    /// CLIENT->MAIN::user-action {action:"stash-search"}.
+    StashSearch(String),
+}
+
 pub struct EventBus {
     clients: Mutex<HashMap<ClientId, Arc<Client>>>,
     last_active: Mutex<Option<ClientId>>,
@@ -81,14 +90,14 @@ pub struct EventBus {
     // our widgets in response. This channel carries that request from the WS
     // connection's own thread over to the GTK main loop, which owns the
     // window/click-through state needed to act on it.
-    focus_game_tx: async_channel::Sender<()>,
+    ui_request_tx: async_channel::Sender<UiRequest>,
     // Latest OVERLAY->MAIN::track-area (price-check popup bounds + holdKey),
     // read by shortcuts.rs's popup tracker on every poll.
     track_area: Mutex<Option<TrackArea>>,
     // Carries a freshly parsed CLIENT->MAIN::update-host-config shortcut
     // list from the WS connection's own thread over to the GTK main loop's
     // shortcuts.rs task, which owns the ashpd GlobalShortcuts session that
-    // needs to react to it. Same shape as focus_game_tx/rx above.
+    // needs to react to it. Same shape as ui_request_tx/rx above.
     shortcut_config_tx: async_channel::Sender<Vec<ShortcutAction>>,
     // Carries the same update-host-config event's restoreClipboard flag,
     // over to shortcuts.rs so price-check can pass it into
@@ -104,10 +113,10 @@ pub struct EventBus {
     quit_tx: async_channel::Sender<()>,
 }
 
-/// `(bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx)`
+/// `(bus, ui_request_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx)`
 type EventBusChannels = (
     EventBus,
-    async_channel::Receiver<()>,
+    async_channel::Receiver<UiRequest>,
     async_channel::Receiver<Vec<ShortcutAction>>,
     async_channel::Receiver<bool>,
     async_channel::Receiver<()>,
@@ -115,7 +124,7 @@ type EventBusChannels = (
 
 impl EventBus {
     pub(crate) fn new() -> EventBusChannels {
-        let (focus_game_tx, focus_game_rx) = async_channel::unbounded();
+        let (ui_request_tx, ui_request_rx) = async_channel::unbounded();
         let (shortcut_config_tx, shortcut_config_rx) = async_channel::unbounded();
         let (restore_clipboard_tx, restore_clipboard_rx) = async_channel::unbounded();
         let (quit_tx, quit_rx) = async_channel::unbounded();
@@ -125,13 +134,13 @@ impl EventBus {
                 last_active: Mutex::new(None),
                 overlay_active: std::sync::atomic::AtomicBool::new(true),
                 next_id: AtomicU64::new(1),
-                focus_game_tx,
+                ui_request_tx,
                 track_area: Mutex::new(None),
                 shortcut_config_tx,
                 restore_clipboard_tx,
                 quit_tx,
             },
-            focus_game_rx,
+            ui_request_rx,
             shortcut_config_rx,
             restore_clipboard_rx,
             quit_rx,
@@ -221,8 +230,8 @@ impl EventBus {
         }
     }
 
-    fn request_focus_game(&self) {
-        let _ = self.focus_game_tx.try_send(());
+    fn request_ui(&self, request: UiRequest) {
+        let _ = self.ui_request_tx.try_send(request);
     }
 
     fn request_shortcut_update(&self, actions: Vec<ShortcutAction>) {
@@ -242,7 +251,7 @@ pub struct Server {
     pub events: Arc<EventBus>,
     pub config: Arc<ConfigStore>,
     pub logger: Arc<Logger>,
-    pub focus_game_rx: async_channel::Receiver<()>,
+    pub ui_request_rx: async_channel::Receiver<UiRequest>,
     pub shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
     pub restore_clipboard_rx: async_channel::Receiver<bool>,
     pub quit_rx: async_channel::Receiver<()>,
@@ -252,7 +261,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
-    let (event_bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx) =
+    let (event_bus, ui_request_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx) =
         EventBus::new();
     let events = Arc::new(event_bus);
     started_at_ms();
@@ -260,7 +269,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
         events: events.clone(),
         config: Arc::new(ConfigStore::new()),
         logger: Arc::new(Logger::new(events.clone())),
-        focus_game_rx,
+        ui_request_rx,
         shortcut_config_rx,
         restore_clipboard_rx,
         quit_rx,
@@ -388,7 +397,7 @@ fn handle_client_event(
             Err(err) => eprintln!("[server] malformed track-area: {err}"),
         },
         "OVERLAY->MAIN::focus-game" => {
-            events.request_focus_game();
+            events.request_ui(UiRequest::FocusGame);
         }
         "CLIENT->MAIN::update-host-config" => {
             let parsed = crate::host_config::parse_host_config(&payload, logger);
@@ -402,8 +411,15 @@ fn handle_client_event(
             crate::kwin_tracker::set_window_title(&parsed.window_title);
         }
         "CLIENT->MAIN::user-action" => {
-            if payload.get("action").and_then(Value::as_str) == Some("quit") {
-                events.request_quit();
+            match payload.get("action").and_then(Value::as_str) {
+                Some("quit") => events.request_quit(),
+                // The stash-search widget's click path (WidgetStashSearch.vue).
+                Some("stash-search") => {
+                    if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                        events.request_ui(UiRequest::StashSearch(text.to_string()));
+                    }
+                }
+                _ => {}
             }
         }
         "CLIENT->MAIN::save-config" => {
