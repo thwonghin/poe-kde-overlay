@@ -175,6 +175,18 @@ async fn apply_shortcuts(
     Ok(())
 }
 
+/// Our built-in actions, then the renderer's (`apply_shortcuts` keeps the
+/// last action per id, so the renderer's own entry wins). The renderer only
+/// sends actions whose hotkey is set in *its* settings, but triggers live in
+/// KDE: without the built-ins, a KDE-only binding (open-wiki, log-item, …)
+/// lost its dispatch entry as soon as a renderer sent its config.
+fn with_builtin_actions(renderer: Vec<ShortcutAction>) -> Vec<ShortcutAction> {
+    let mut actions = default_actions();
+    actions.extend(extra_registerable_actions());
+    actions.extend(renderer);
+    actions
+}
+
 /// The portal has been observed emitting multiple Activated signals for one
 /// physical keypress — without this, duplicate Ctrl+C injections and proxy
 /// requests. Per id, so two different hotkeys pressed in quick succession
@@ -214,9 +226,7 @@ async fn run(
         all_shortcuts: load_known_shortcuts(),
         ..Default::default()
     }));
-    let mut initial_actions = default_actions();
-    initial_actions.extend(extra_registerable_actions());
-    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, initial_actions).await?;
+    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, with_builtin_actions(Vec::new())).await?;
 
     let mut activated = proxy.receive_activated().await?;
 
@@ -239,8 +249,8 @@ async fn run(
         let overlay = overlay.clone();
         glib::spawn_future_local(async move {
             while let Ok(shortcuts) = shortcuts_rx.recv().await {
-                let result =
-                    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, shortcuts).await;
+                let actions = with_builtin_actions(shortcuts);
+                let result = apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, actions).await;
                 if let Err(err) = result {
                     overlay
                         .logger
@@ -650,6 +660,21 @@ fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_actions_stay_dispatchable_and_the_renderer_wins() {
+        let renderer = ShortcutAction {
+            shortcut: "Ctrl + E".into(),
+            keep_mod_keys: false,
+            action: ActionKind::CopyItem { target: "open-wiki".into(), focus_overlay: false },
+        };
+        let mut dispatch = HashMap::new();
+        for action in with_builtin_actions(vec![renderer]) {
+            dispatch.insert(shortcut_id(&action).unwrap(), action);
+        }
+        assert!(dispatch.contains_key("copy-item-log-item-false"));
+        assert_eq!(dispatch["copy-item-open-wiki-false"].shortcut, "Ctrl + E");
+    }
 
     #[test]
     fn debounce_is_per_hotkey() {
