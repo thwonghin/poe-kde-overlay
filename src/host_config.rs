@@ -319,10 +319,11 @@ pub fn default_actions() -> Vec<ShortcutAction> {
     ]
 }
 
-/// The rest of the copy-item targets the renderer UI can configure
+/// The rest of the copy-item targets either renderer's UI can configure
 /// (settings-item-check.vue's wiki/PoEDB/Craft of Exile/find-in-stash keys,
-/// plus item-check), registered with no default trigger like upstream
-/// leaves them. Registering them up front is what makes them appear as
+/// poe2's find-same-priced key, plus item-check), registered with no
+/// default trigger like upstream leaves them. Kept complete by the
+/// `every_vendor_copy_item_target_is_registerable` test. Registering them up front is what makes them appear as
 /// bindable entries in KDE's Global Shortcuts settings — the only place
 /// left to set them, since our Hotkeys/Item Info tabs are replaced.
 pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
@@ -340,6 +341,8 @@ pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
         copy_item("open-poedb", false),
         copy_item("open-craft-of-exile", false),
         copy_item("search-similar", false),
+        // poe2 only; pressing it while poe1 is shown has no dispatch entry.
+        copy_item("search-same-priced", false),
     ]
 }
 
@@ -421,6 +424,37 @@ mod tests {
         let unique: HashSet<_> = ids.iter().cloned().collect();
         assert_eq!(unique.len(), ids.len(), "expected no duplicate ids among defaults + extras");
         assert!(ids.iter().all(Option::is_some));
+    }
+
+    /// A copy-item target added to either vendor's getConfigForHost must be
+    /// registered here, or it can't be bound anywhere (its settings row is
+    /// behind our banner).
+    #[test]
+    fn every_vendor_copy_item_target_is_registerable() {
+        // poe2's item library: its write-data event is ignored (ipc.rs).
+        const UNSUPPORTED: &[&str] = &["log-item"];
+        let ours: HashSet<String> = default_actions()
+            .into_iter()
+            .chain(extra_registerable_actions())
+            .filter_map(|a| match a.action {
+                ActionKind::CopyItem { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect();
+        for source in crate::game::vendor_sources("renderer/src/web/Config.ts") {
+            let source = source.replace('"', "'");
+            let body = &source[source.find("function getConfigForHost").expect("getConfigForHost moved")..];
+            let mut found = 0;
+            for (at, _) in body.match_indices("type: 'copy-item'") {
+                let target = crate::game::ts_string_values(&body[at..], "target").remove(0);
+                found += 1;
+                assert!(
+                    ours.contains(&target) || UNSUPPORTED.contains(&target.as_str()),
+                    "copy-item target {target:?} isn't in extra_registerable_actions"
+                );
+            }
+            assert!(found >= 5, "parsed only {found} copy-item targets");
+        }
     }
 
     #[test]
