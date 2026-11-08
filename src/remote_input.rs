@@ -525,7 +525,7 @@ impl RemoteInput {
         // this Ctrl+C should end the first wait early.
         while self.text_copied.try_recv().is_ok() {}
         self.release_shortcut_keys(hotkey, keep_mod_keys);
-        self.press_copy(keep_mod_keys, show_mods_key);
+        self.press_copy(keep_mod_keys, show_mods_key).await;
 
         let previous = match self.read_clipboard_if_offered().await {
             Ok(text) => text,
@@ -567,7 +567,7 @@ impl RemoteInput {
                 PollStep::Wait => {}
                 PollStep::Recopy => {
                     debug!("[remote_input] clipboard changed without item text; copying again");
-                    self.press_copy(keep_mod_keys, show_mods_key);
+                    self.press_copy(keep_mod_keys, show_mods_key).await;
                 }
                 PollStep::TimedOut { changed } => {
                     self.logger.error(if changed {
@@ -668,14 +668,24 @@ impl RemoteInput {
     /// Ctrl(+showModsKey)+C (game_config.rs) via `copy_sequence`.
     /// The held mask is only trusted with `keep_mod_keys`: otherwise
     /// release_shortcut_keys just injected releases it doesn't reflect yet.
-    fn press_copy(&self, keep_mod_keys: bool, show_mods_key: Option<&str>) {
+    /// The modifier releases go out 10ms after C, like pressKeysToCopyItemText
+    /// ("Game was dropping the release inputs"): sent in the same burst, PoE
+    /// sometimes missed Alt's release and kept the advanced description up
+    /// after a blur, until Alt was pressed again (reported live).
+    async fn press_copy(&self, keep_mod_keys: bool, show_mods_key: Option<&str>) {
         use ei::keyboard::KeyState::{Press, Released};
         let held = if keep_mod_keys { self.depressed_mods() } else { 0 };
         let seq: Vec<_> = copy_sequence(show_mods_key, held)
             .into_iter()
             .map(|(key, down)| (key, if down { Press } else { Released }))
             .collect();
-        self.press_keys(&seq);
+        let tapped = seq.iter().position(|&(key, state)| key == KEY_C && state == Released).map_or(seq.len(), |i| i + 1);
+        let (keys_down, releases) = seq.split_at(tapped);
+        self.press_keys(keys_down);
+        if !releases.is_empty() {
+            gtk4::glib::timeout_future(std::time::Duration::from_millis(10)).await;
+            self.press_keys(releases);
+        }
     }
 
     /// Port of Shortcuts.ts's key-up toggle before acting on a hotkey: the
