@@ -18,10 +18,7 @@ use serde_json::json;
 
 use crate::server::EventBus;
 
-// XKB modifier mask bits as reported by ei_keyboard.modifiers.
-const SHIFT: u32 = 1 << 0;
-const CTRL: u32 = 1 << 2;
-const ALT: u32 = 1 << 3;
+use crate::remote_input::{MOD_ALT as ALT, MOD_CTRL as CTRL, MOD_SHIFT as SHIFT};
 
 fn is_alt_only(depressed: u32) -> bool {
     depressed & (SHIFT | CTRL | ALT) == ALT

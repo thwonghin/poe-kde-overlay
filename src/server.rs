@@ -37,6 +37,30 @@ struct Client {
     tx: std::sync::mpsc::Sender<String>,
 }
 
+/// `ipc/types.ts`'s `IpcTrackArea` payload, in the overlay WebView's CSS
+/// pixels (`area` is relative to the overlay window; `from` is the position
+/// we sent with item-text, i.e. global).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackArea {
+    pub hold_key: String,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Rect {
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x > self.x && x < self.x + self.width && y > self.y && y < self.y + self.height
+    }
+}
+
 pub struct EventBus {
     clients: Mutex<HashMap<ClientId, Arc<Client>>>,
     last_active: Mutex<Option<ClientId>>,
@@ -58,6 +82,9 @@ pub struct EventBus {
     // connection's own thread over to the GTK main loop, which owns the
     // window/click-through state needed to act on it.
     focus_game_tx: async_channel::Sender<()>,
+    // Latest OVERLAY->MAIN::track-area (price-check popup bounds + holdKey),
+    // read by shortcuts.rs's popup tracker on every poll.
+    track_area: Mutex<Option<TrackArea>>,
     // Carries a freshly parsed CLIENT->MAIN::update-host-config shortcut
     // list from the WS connection's own thread over to the GTK main loop's
     // shortcuts.rs task, which owns the ashpd GlobalShortcuts session that
@@ -99,6 +126,7 @@ impl EventBus {
                 overlay_active: std::sync::atomic::AtomicBool::new(true),
                 next_id: AtomicU64::new(1),
                 focus_game_tx,
+                track_area: Mutex::new(None),
                 shortcut_config_tx,
                 restore_clipboard_tx,
                 quit_tx,
@@ -140,6 +168,17 @@ impl EventBus {
                 }
             }
         }
+    }
+
+    pub fn track_area(&self) -> Option<TrackArea> {
+        self.track_area.lock().unwrap().clone()
+    }
+
+    /// Dropped before each new item-text so the tracker never acts on the
+    /// previous popup's bounds while the renderer's new track-area is in
+    /// flight.
+    pub fn clear_track_area(&self) {
+        *self.track_area.lock().unwrap() = None;
     }
 
     fn mark_active(&self, id: ClientId) {
@@ -341,6 +380,13 @@ fn handle_client_event(
                 .unwrap_or(true);
             events.set_overlay_active(is_overlay);
         }
+        "OVERLAY->MAIN::track-area" => match serde_json::from_value::<TrackArea>(payload) {
+            Ok(area) => {
+                println!("[server] track-area: {area:?}");
+                *events.track_area.lock().unwrap() = Some(area);
+            }
+            Err(err) => eprintln!("[server] malformed track-area: {err}"),
+        },
         "OVERLAY->MAIN::focus-game" => {
             events.request_focus_game();
         }
@@ -512,6 +558,22 @@ pub(crate) fn write_response_with_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_area_parses_renderer_payload() {
+        let payload = json!({
+            "holdKey": "Ctrl",
+            "closeThreshold": 40,
+            "from": { "x": 2400, "y": 1100 },
+            "area": { "x": 1500, "y": 0, "width": 460, "height": 1440 },
+            "dpr": 1
+        });
+        let t: TrackArea = serde_json::from_value(payload).unwrap();
+        assert_eq!(t.hold_key, "Ctrl");
+        assert!(t.area.contains(1600.0, 700.0));
+        assert!(!t.area.contains(1400.0, 700.0));
+        assert!(!t.area.contains(1600.0, 1440.0));
+    }
 
     #[test]
     fn dist_dir_falls_back_to_system_path_without_override() {

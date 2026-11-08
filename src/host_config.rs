@@ -27,6 +27,11 @@ struct HostConfig {
 pub struct ShortcutAction {
     pub shortcut: String,
     pub action: ActionKind,
+    /// Shortcuts.ts: only release the trigger's non-modifier key and leave
+    /// held modifiers alone (the renderer sets this for the hold-to-pin
+    /// price-check hotkey and toggle-overlay).
+    #[serde(default, rename = "keepModKeys")]
+    pub keep_mod_keys: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -207,10 +212,12 @@ pub fn default_actions() -> Vec<ShortcutAction> {
     vec![
         ShortcutAction {
             shortcut: "Shift + Space".to_string(),
+            keep_mod_keys: true,
             action: ActionKind::ToggleOverlay,
         },
         ShortcutAction {
             shortcut: "Ctrl + D".to_string(),
+            keep_mod_keys: true,
             action: ActionKind::CopyItem {
                 target: "price-check".to_string(),
                 focus_overlay: false,
@@ -218,6 +225,7 @@ pub fn default_actions() -> Vec<ShortcutAction> {
         },
         ShortcutAction {
             shortcut: "Ctrl + Alt + D".to_string(),
+            keep_mod_keys: false,
             action: ActionKind::CopyItem {
                 target: "price-check".to_string(),
                 focus_overlay: true,
@@ -242,6 +250,7 @@ pub fn default_actions() -> Vec<ShortcutAction> {
 pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
     let copy_item = |target: &str, focus_overlay: bool| ShortcutAction {
         shortcut: String::new(),
+        keep_mod_keys: false,
         action: ActionKind::CopyItem {
             target: target.to_string(),
             focus_overlay,
@@ -387,6 +396,7 @@ mod tests {
         let actions = vec![
             ShortcutAction {
                 shortcut: "Ctrl + C".to_string(),
+                keep_mod_keys: false,
                 action: ActionKind::CopyItem {
                     target: "price-check".to_string(),
                     focus_overlay: false,
@@ -394,6 +404,7 @@ mod tests {
             },
             ShortcutAction {
                 shortcut: "Ctrl + D".to_string(),
+                keep_mod_keys: false,
                 action: ActionKind::CopyItem {
                     target: "price-check".to_string(),
                     focus_overlay: false,
@@ -401,6 +412,7 @@ mod tests {
             },
             ShortcutAction {
                 shortcut: "Ctrl + D".to_string(),
+                keep_mod_keys: false,
                 action: ActionKind::CopyItem {
                     target: "item-check".to_string(),
                     focus_overlay: true,
@@ -408,10 +420,12 @@ mod tests {
             },
             ShortcutAction {
                 shortcut: "Shift + Space".to_string(),
+                keep_mod_keys: false,
                 action: ActionKind::ToggleOverlay,
             },
             ShortcutAction {
                 shortcut: "Shift + Space".to_string(),
+                keep_mod_keys: false,
                 action: ActionKind::ToggleOverlay,
             },
         ];
@@ -430,6 +444,7 @@ mod tests {
     fn shortcut_id_ignores_trigger_but_distinguishes_target_and_focus_overlay() {
         let a = ShortcutAction {
             shortcut: "Ctrl + D".to_string(),
+            keep_mod_keys: false,
             action: ActionKind::CopyItem {
                 target: "price-check".to_string(),
                 focus_overlay: false,
@@ -442,6 +457,7 @@ mod tests {
         // look like a brand new action and mint a second, competing bind.
         let same_action_different_key = ShortcutAction {
             shortcut: "Ctrl + E".to_string(),
+            keep_mod_keys: false,
             action: ActionKind::CopyItem {
                 target: "price-check".to_string(),
                 focus_overlay: false,
@@ -449,6 +465,7 @@ mod tests {
         };
         let different_target = ShortcutAction {
             shortcut: "Ctrl + D".to_string(),
+            keep_mod_keys: false,
             action: ActionKind::CopyItem {
                 target: "item-check".to_string(),
                 focus_overlay: false,
@@ -456,6 +473,7 @@ mod tests {
         };
         let different_focus_overlay = ShortcutAction {
             shortcut: "Ctrl + D".to_string(),
+            keep_mod_keys: false,
             action: ActionKind::CopyItem {
                 target: "price-check".to_string(),
                 focus_overlay: true,
@@ -468,6 +486,7 @@ mod tests {
         assert_eq!(
             shortcut_id(&ShortcutAction {
                 shortcut: "x".to_string(),
+                keep_mod_keys: false,
                 action: ActionKind::Unsupported
             }),
             None

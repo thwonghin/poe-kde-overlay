@@ -9,6 +9,7 @@ use ashpd::desktop::Session;
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
 use gtk4::{ApplicationWindow, glib};
+use gtk4_layer_shell::LayerShell;
 use serde_json::json;
 
 use crate::host_config::{
@@ -16,7 +17,7 @@ use crate::host_config::{
 };
 use crate::kwin_tracker::WindowEvent;
 use crate::logger::Logger;
-use crate::remote_input::RemoteInput;
+use crate::remote_input::{MOD_ALT, MOD_CTRL, RemoteInput};
 use crate::server::EventBus;
 use crate::{set_click_through, toggle_click_through};
 
@@ -335,6 +336,8 @@ async fn run(
                 if click_through.get() && !poe_active {
                     println!("[shortcuts] toggle-overlay ignored: active window is not Path of Exile");
                 } else {
+                    // Shortcuts.ts: areaTracker.removeListeners() first.
+                    AUTO_CLOSE_GEN.with(|g| g.set(g.get() + 1));
                     toggle_click_through(window, click_through, events)
                 }
             }
@@ -355,6 +358,7 @@ async fn run(
                     &target,
                     focus_overlay,
                     &action.shortcut,
+                    action.keep_mod_keys,
                     restore_clipboard,
                 )
                 .await
@@ -392,6 +396,7 @@ async fn price_check(
     target: &str,
     focus_overlay: bool,
     shortcut: &str,
+    keep_mod_keys: bool,
     restore_clipboard: &Rc<Cell<bool>>,
 ) {
     println!(
@@ -481,8 +486,7 @@ async fn price_check(
         if cursor.is_some_and(|(_, _, poe_active)| !poe_active) {
             return None;
         }
-        remote.release_shortcut_keys(shortcut);
-        Some((cursor, remote.copy_item_text(restore_clipboard.get()).await))
+        Some((cursor, remote.copy_item_text(restore_clipboard.get(), shortcut, keep_mod_keys).await))
     });
     let timeout = std::pin::pin!(glib::timeout_future(PRICE_CHECK_TIMEOUT));
     let (cursor, copied) = match futures_util::future::select(work, timeout).await {
@@ -527,6 +531,7 @@ async fn price_check(
     // ("hotkeyLocked") sends focusOverlay:true, which skips that (real
     // APT's own hover-to-interact replacement for the auto-close path —
     // ours is a simpler Rust-side poll, see spawn_auto_close).
+    events.clear_track_area();
     events.send_last_active(
         "MAIN->CLIENT::item-text",
         json!({
@@ -553,29 +558,41 @@ async fn price_check(
         spawn_auto_close(
             x,
             y,
+            window.clone(),
+            click_through.clone(),
             kwin_connection.clone(),
+            remote_input.clone(),
             events.clone(),
             price_check_open.clone(),
+            price_check_locked.clone(),
         );
     }
 }
 
-/// Ported from main/src/windowing/WidgetAreaTracker.ts: closes the popup
-/// once the cursor has moved far enough from where the item was originally
-/// hovered. Polls via the same one-shot KWin cursor query used to capture
-/// `from` in the first place, rather than the real implementation's
-/// continuous uiohook mousemove stream (which we don't have on Wayland).
+/// Port of main/src/windowing/WidgetAreaTracker.ts's mousemove handler,
+/// polled via the same one-shot KWin cursor query used to capture `from`
+/// (we have no continuous mousemove stream on Wayland):
+/// - overlay not interactive and the price-check `holdKey` not held: close
+///   the popup once the cursor moves far enough from where the item was;
+/// - otherwise, cursor inside the popup's area (OVERLAY->MAIN::track-area):
+///   make the overlay interactive (hold-to-pin / hover-to-interact);
+/// - otherwise, if interactive: hand control back to the game and stop.
+/// ponytail: upstream's mousedown-in-area handler is skipped; a click
+/// inside the area is always preceded by a move there, which this covers.
 fn spawn_auto_close(
     from_x: f64,
     from_y: f64,
+    window: ApplicationWindow,
+    click_through: Rc<Cell<bool>>,
     kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
+    remote_input: Rc<RefCell<Option<RemoteInput>>>,
     events: Arc<EventBus>,
     price_check_open: Rc<Cell<bool>>,
+    price_check_locked: Rc<Cell<bool>>,
 ) {
-    // The real default (2.5 * font size, ~50px) is paired with a
-    // hold-Ctrl-to-pin escape hatch we don't have; a bit more generous here
-    // so small mouse drift while reading doesn't close it prematurely, but
-    // not so generous it feels laggy to dismiss.
+    // Upstream's threshold is the renderer's closeThreshold (2.5 * font
+    // size, ~40px); kept at our older, more generous 80px so small mouse
+    // drift while reading doesn't close it prematurely.
     //
     // POLL_INTERVAL was tried at 40ms for a snappier close, but each tick
     // costs a full KWin loadScript/run/unloadScript D-Bus round trip plus
@@ -620,14 +637,62 @@ fn spawn_auto_close(
             if AUTO_CLOSE_GEN.with(Cell::get) != generation {
                 return;
             }
-            let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
-            if distance > CLOSE_THRESHOLD {
-                println!("[shortcuts] auto-close: cursor moved {distance:.0}px");
-                events.broadcast(
-                    "MAIN->OVERLAY::hide-exclusive-widget",
-                    serde_json::Value::Null,
-                );
-                price_check_open.set(false);
+
+            let track = events.track_area();
+            let mods = remote_input
+                .borrow()
+                .as_ref()
+                .map_or(0, RemoteInput::depressed_mods);
+            let modifier = if mods & MOD_CTRL != 0 {
+                "Ctrl"
+            } else if mods & MOD_ALT != 0 {
+                "Alt"
+            } else {
+                ""
+            };
+            let holding = track.as_ref().is_some_and(|t| t.hold_key == modifier);
+            // `area` is relative to the overlay window, which covers its
+            // monitor; the cursor is in global compositor coordinates.
+            let (ox, oy) = window
+                .monitor()
+                .map_or((0.0, 0.0), |m| {
+                    let geo = gtk4::prelude::MonitorExt::geometry(&m);
+                    (geo.x() as f64, geo.y() as f64)
+                });
+            let inside = track
+                .as_ref()
+                .is_some_and(|t| t.area.contains(x - ox, y - oy));
+
+            if click_through.get() && !holding {
+                let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
+                if distance > CLOSE_THRESHOLD {
+                    println!("[shortcuts] auto-close: cursor moved {distance:.0}px");
+                    events.broadcast(
+                        "MAIN->OVERLAY::hide-exclusive-widget",
+                        serde_json::Value::Null,
+                    );
+                    price_check_open.set(false);
+                    return;
+                }
+            } else if inside {
+                if click_through.get() {
+                    println!("[shortcuts] popup tracker: cursor entered popup, activating overlay");
+                    set_click_through(false, &window, &click_through, &events);
+                    // Same state as a locked popup: the overlay owns input,
+                    // so the next hotkey press closes instead of copying.
+                    price_check_locked.set(true);
+                }
+            } else if !click_through.get() {
+                println!("[shortcuts] popup tracker: cursor left popup, returning to game");
+                close_all_ui(
+                    &window,
+                    &click_through,
+                    &events,
+                    &price_check_open,
+                    &price_check_locked,
+                    &kwin_connection,
+                )
+                .await;
                 return;
             }
         }

@@ -14,7 +14,9 @@ resetting overlay state when PoE regains OS focus, and a tray icon (via
 `trigger-event` hotkeys (stopwatch/delve grid), the `overlay-attached`
 "overlay ready" toast, honoring the `windowTitle` setting, and gating
 toggle-overlay activation on PoE focus, releasing the hotkey's own
-keys before injecting Ctrl+C, and Alt-hold-to-hide (`overlay_visibility.rs`) —
+keys before injecting Ctrl+C, Alt-hold-to-hide (`overlay_visibility.rs`),
+and the price-check popup tracker's hold-to-pin / hover-to-interact plus
+`keepModKeys` (`spawn_auto_close` in `shortcuts.rs`) —
 have been removed from this list to keep it focused on what's actually
 still open. See git history for how each landed; the reasoning behind
 non-obvious decisions (e.g. why hotkeys are now configured in KDE System
@@ -54,29 +56,6 @@ just a generic multi-key-tap helper — no new portal capability needed. The sam
 widget's click path, `WidgetStashSearch.vue`), which `server.rs` currently
 ignores — wire both when this lands.
 
-## 3. No hover-to-interact / hold-modifier-to-pin for the price-check popup
-
-Real `WidgetAreaTracker.ts` continuously tracks the mouse (`uiohook`
-`mousemove`/`mousedown`) against a screen-space rectangle sent by the
-renderer (`OVERLAY->MAIN::track-area`, includes a `holdKey`): moving the
-mouse *into* that rectangle auto-activates the overlay for interaction
-(`assertOverlayActive`) without needing the locked hotkey at all, and holding
-a configured modifier key pins the popup open past the normal distance-close
-threshold.
-
-We: only the distance-based auto-close is ported (`spawn_auto_close` in
-`shortcuts.rs`); hovering back into the popup doesn't re-activate anything,
-and there's no hold-to-pin. Hold-to-pin is no longer blocked: the EIS
-keyboard's `KeyboardModifiers` events turned out to carry the seat's real
-modifier state (`overlay_visibility.rs` already uses it for Alt-hold-hide),
-so `holdKey` can be read the same way.
-
-Real fix shape: we already receive `OVERLAY->MAIN::track-area` payloads
-nowhere (no listener) — would need a live cursor-position stream (not the
-current one-shot KWin query-per-poll) to react promptly, which is a bigger
-lift than it sounds given our cursor position only comes from on-demand KWin
-scripting round-trips.
-
 ## 4. No `logKeys` debug logging
 
 `Shortcuts.ts` has a `logKeys` config flag (a renderer Settings toggle) that,
@@ -109,12 +88,6 @@ separate, sizeable feature — would need a file watcher on the log path
   "advanced item description" keybind) — as of PoE 3.29, `Shortcuts.ts`
   hardcodes `showModsKey = 'Ctrl'` and ignores whatever `GameConfig` found
   anyway. Close to dead code in the real app too now; not worth porting.
-- **`keepModKeys` config field** — only matters for deciding whether to
-  reuse a still-physically-held modifier key vs. synthesizing the whole
-  combo fresh; we always synthesize a full Ctrl+C, matching real APT's own
-  `keepModKeys:false` code path. Portable now that the EIS modifier feed
-  exists (see `overlay_visibility.rs`), but no known reason to.
-
 ## 7. Small differences: proxy cookies, single-instance lock
 
 Neither looks urgent; noting them so they don't get re-discovered from
@@ -152,9 +125,7 @@ scratch later.
    multi-tap helper (`key_to_evdev` covers the keycodes); the clipboard-write wrapper it
    also needs already exists (`RemoteInput::write_clipboard_text`) and can
    be reused as-is.
-2. §3 (hover-to-interact, hold-to-pin) — hold-to-pin can use the EIS
-   modifier feed; hover-to-interact is still blocked on a live cursor
-   stream. §4 (`logKeys`) is low value with only modifier transitions to log.
+2. §4 (`logKeys`) — low value with only modifier transitions to log.
 3. §5 (game log watcher) — biggest standalone feature, independent of
    everything else; tackle whenever, in its own pass.
 4. §7 — proxy cookies and the single-instance lock have no confirmed

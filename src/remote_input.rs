@@ -26,6 +26,15 @@ use crate::logger::Logger;
 const KEY_LEFTCTRL: u32 = 29;
 const KEY_C: u32 = 46;
 
+// XKB modifier mask bits as reported by ei_keyboard.modifiers (depressed).
+pub const MOD_SHIFT: u32 = 1 << 0;
+pub const MOD_CTRL: u32 = 1 << 2;
+pub const MOD_ALT: u32 = 1 << 3;
+
+fn is_mod_key(key: &str) -> bool {
+    matches!(key, "Ctrl" | "Shift" | "Alt")
+}
+
 /// Renderer key name (`ipc/KeyToCode.ts`'s vocabulary, as used in a
 /// `shortcut` string like "Ctrl + D") → evdev keycode.
 fn key_to_evdev(key: &str) -> Option<u32> {
@@ -187,6 +196,10 @@ pub struct RemoteInput {
     // (optimistic) since there's no way to query current state up front,
     // only be notified of changes.
     clipboard_offers_text: Rc<Cell<bool>>,
+    // Latest depressed-modifier mask from the EIS KeyboardModifiers events,
+    // which reflect the seat (the user's real keyboard), not just our own
+    // injected keys — see overlay_visibility.rs.
+    depressed_mods: Rc<Cell<u32>>,
     logger: Arc<Logger>,
 }
 
@@ -245,8 +258,10 @@ impl RemoteInput {
             .map_err(|err| ashpd::Error::IO(std::io::Error::other(err.to_string())))?;
 
         let keyboard = Rc::new(RefCell::new(None));
+        let depressed_mods = Rc::new(Cell::new(0));
         {
             let keyboard = keyboard.clone();
+            let depressed_mods = depressed_mods.clone();
             let event_loop_context = context.clone();
             gtk4::glib::spawn_future_local(async move {
                 while let Some(result) = events.next().await {
@@ -276,7 +291,10 @@ impl RemoteInput {
                                 println!("[remote_input] device added without keyboard interface");
                             }
                         }
-                        EiEvent::KeyboardModifiers(mods) => on_modifiers(mods.depressed),
+                        EiEvent::KeyboardModifiers(mods) => {
+                            depressed_mods.set(mods.depressed);
+                            on_modifiers(mods.depressed);
+                        }
                         EiEvent::DeviceResumed(resumed) => {
                             resumed.device.device().start_emulating(0, 0);
                             let _ = event_loop_context.flush();
@@ -395,6 +413,7 @@ impl RemoteInput {
             session,
             pending_clipboard_write,
             clipboard_offers_text,
+            depressed_mods,
             logger,
         })
     }
@@ -483,14 +502,20 @@ impl RemoteInput {
     /// that's specifically about Electron's clipboard API being vetoed by
     /// Klipper; revisit only if writing an empty string here turns out not
     /// to actually clear it in testing.
-    pub async fn copy_item_text(&self, restore: bool) -> ashpd::Result<Option<String>> {
+    pub async fn copy_item_text(
+        &self,
+        restore: bool,
+        hotkey: &str,
+        keep_mod_keys: bool,
+    ) -> ashpd::Result<Option<String>> {
         // Press *before* the snapshot/clear, unlike real HostClipboard.ts.
         // Tried the upstream order (snapshot first) live: the pre-read then
         // hits whatever owned the clipboard before (often not offering text)
         // and trips the portal's not-offered-format hang (see
         // read_clipboard_once_bounded), wedging later calls. Pressing first
         // means PoE already owns the selection by the time we read.
-        self.press_ctrl_c();
+        self.release_shortcut_keys(hotkey, keep_mod_keys);
+        self.press_copy(keep_mod_keys);
 
         let previous = match self.read_clipboard_if_offered().await {
             Ok(text) => text,
@@ -577,13 +602,28 @@ impl RemoteInput {
             .await
     }
 
-    pub fn press_ctrl_c(&self) {
-        self.press_keys(&[
-            (KEY_LEFTCTRL, ei::keyboard::KeyState::Press),
-            (KEY_C, ei::keyboard::KeyState::Press),
-            (KEY_C, ei::keyboard::KeyState::Released),
-            (KEY_LEFTCTRL, ei::keyboard::KeyState::Released),
-        ]);
+    pub fn depressed_mods(&self) -> u32 {
+        self.depressed_mods.get()
+    }
+
+    /// Ctrl+C, but like pressKeysToCopyItemText, don't toggle Ctrl if the
+    /// user is already holding it (keepModKeys hotkeys leave it held):
+    /// injecting a Ctrl release would clear the seat's Ctrl state while the
+    /// physical key is still down, breaking hold-to-pin.
+    /// Only trusted with `keep_mod_keys`: otherwise release_shortcut_keys
+    /// just injected a Ctrl release that the mask doesn't reflect yet.
+    fn press_copy(&self, keep_mod_keys: bool) {
+        use ei::keyboard::KeyState::{Press, Released};
+        if keep_mod_keys && self.depressed_mods() & MOD_CTRL != 0 {
+            self.press_keys(&[(KEY_C, Press), (KEY_C, Released)]);
+        } else {
+            self.press_keys(&[
+                (KEY_LEFTCTRL, Press),
+                (KEY_C, Press),
+                (KEY_C, Released),
+                (KEY_LEFTCTRL, Released),
+            ]);
+        }
     }
 
     /// Port of Shortcuts.ts's key-up toggle before acting on a hotkey: the
@@ -594,9 +634,12 @@ impl RemoteInput {
     /// rebound the hotkey in KDE System Settings these may be the wrong keys
     /// (stray key-ups are harmless). Upgrade path: track the portal's
     /// bound `trigger_description` instead.
-    pub fn release_shortcut_keys(&self, shortcut: &str) {
+    /// With `keep_mod_keys` only the non-modifier key is released, matching
+    /// Shortcuts.ts.
+    fn release_shortcut_keys(&self, shortcut: &str, keep_mod_keys: bool) {
         let keys: Vec<_> = shortcut
             .rsplit(" + ")
+            .filter(|key| !(keep_mod_keys && is_mod_key(key)))
             .filter_map(key_to_evdev)
             .map(|code| (code, ei::keyboard::KeyState::Released))
             .collect();
