@@ -14,16 +14,11 @@ WebSocket and HTTP protocol. The build uses only the submodule's
 
 ```mermaid
 flowchart LR
-    R["vendor/awakened-poe-trade renderer<br/>(unmodified Vue UI)"]
-    subgraph H["apt-kwin-overlay (this repo, Rust + GTK4)"]
-        S["Local HTTP/WS server<br/>serves the renderer's dist/ and speaks its<br/>MAIN/OVERLAY/CLIENT protocol in place of Electron IPC"]
-        W["WebKitGTK<br/>renders the vendored renderer"]
-        L["gtk4-layer-shell<br/>fullscreen click-through overlay surface"]
-        P["xdg-desktop-portal<br/>global shortcuts, remote input (EIS),<br/>clipboard read/write"]
-        K["KWin scripting (org.kde.KWin D-Bus)<br/>window tracking (find/follow PoE),<br/>cursor position queries"]
-    end
-    R <-->|HTTP / WebSocket| S
-    W -->|renders| R
+    R["APT renderer<br/>(unmodified Vue)"] <-->|HTTP / WebSocket| H["apt-kwin-overlay<br/>(Rust + GTK4)"]
+    H -->|renders the UI| W[WebKitGTK]
+    H -->|overlay surface| L[gtk4-layer-shell]
+    H -->|hotkeys, input, clipboard| P[xdg-desktop-portal]
+    H -->|find PoE, cursor| K[KWin scripting]
 ```
 
 Each module in `src/` reimplements one part of APT's `main/src/*`, enough
