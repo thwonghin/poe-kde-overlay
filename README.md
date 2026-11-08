@@ -2,16 +2,13 @@
 
 A native KWin/Wayland backend for [Awakened PoE Trade](https://github.com/SnosMe/awakened-poe-trade) (APT).
 
-APT's overlay (hotkeys, click-through, global input injection, clipboard
-capture) is built entirely on Electron/X11 APIs and doesn't work under
-Wayland. This project throws away APT's Electron `main` process and
-replaces it with a small Rust/GTK4 host that does the same job using
-native Wayland/KDE mechanisms — while running APT's **real, unmodified**
-Vue renderer (vendored as a git submodule) on top of it, talking over the
-same WebSocket/HTTP protocol it always has.
-
-If you're on KDE Plasma (Wayland) and want APT's price-check overlay
-without falling back to X11/XWayland, this is what that looks like.
+APT's overlay uses Electron and X11 APIs for hotkeys, click-through, input
+injection and clipboard capture, so it doesn't work under Wayland. This
+project replaces APT's Electron `main` process with a small Rust/GTK4 host
+that uses Wayland and KDE APIs instead. The host runs APT's unmodified Vue
+renderer, vendored as a git submodule, and talks to it over the same
+WebSocket and HTTP protocol. The build uses only the submodule's
+`renderer/`, never its `main/`.
 
 ## How it works
 
@@ -32,58 +29,68 @@ without falling back to X11/XWayland, this is what that looks like.
                                                                    protocol in place of Electron IPC
 ```
 
-Everything under `src/` is a from-scratch reimplementation of one narrow
-slice of APT's `main/src/*` — just enough of the host contract for the real
-renderer to think it's still running inside Electron:
+Each module in `src/` reimplements one part of APT's `main/src/*`, enough
+for the renderer to work as it does under Electron:
 
 | Module | Replaces (upstream `main/src/*`) | Does |
 |---|---|---|
-| `main.rs` | window-management bits of `OverlayWindow.ts` | Builds the layer-shell surface, toggles click-through/keyboard-focus mode, handles Escape/Ctrl+W locally while a widget is interactive, injected JS pointing the renderer's now-inert Hotkeys UI at KDE Settings |
-| `server.rs` | `server.ts`, IPC bus | Local HTTP server serving the renderer's `dist/`, plus the WebSocket event bus (`MAIN->OVERLAY`, `OVERLAY->MAIN`, etc.) the renderer expects instead of Electron IPC |
-| `ipc.rs` | `ipc/types.ts` | Every WebSocket event and the `/config` body as typed Rust; `cargo test` type-checks them against upstream's TypeScript with `tsc` |
-| `shortcuts.rs` | `shortcuts/Shortcuts.ts` | Binds hotkeys dynamically (from the renderer's own shortcut config) via the `GlobalShortcuts` portal, dispatches price-check/toggle-overlay/copy-item actions, popup auto-close |
-| `host_config.rs` | config parsing bits of `Shortcuts.ts`/`ConfigStore.ts` | Parses the renderer's `update-host-config` shortcut list and `restoreClipboard` flag; pre-registers all configurable actions with KDE so they're nameable/bindable in System Settings → Shortcuts |
-| `remote_input.rs` | `HostClipboard.ts`, synthetic key injection | Simulates Ctrl+C, reads clipboard with retry/validation, and restores it afterward via the `RemoteDesktop`/`ConnectToEIS` and `Clipboard` portals (libei), since there's no other portal-sanctioned way to inject input or read/write the clipboard on Wayland |
-| `kwin_tracker.rs` | window-tracking bits of `OverlayWindow.ts` | Loads a small persistent KWin script over D-Bus to track window activation/geometry (find PoE, follow it across monitors, reset overlay state when PoE regains focus) and do one-shot cursor-position queries |
-| `proxy.rs` | `proxy.ts` | Proxies renderer requests to poe.ninja / pathofexile.com (same host allowlist, UA override) |
-| `config_store.rs` | `ConfigStore.ts` | Persists the renderer's settings blob to disk, opaquely |
-| `uploads.rs` | upload handling | Screenshot/image upload storage, served back over HTTP |
-| `logger.rs` | `RemoteLogger.ts` | In-memory log buffer replayed to newly connected WS clients |
-
-The renderer itself lives in `vendor/awakened-poe-trade` as an unmodified
-git submodule — no patches, no fork. We only build its `renderer/` (the
-Vue app), never its `main/` (the Electron process this project replaces).
+| `main.rs` | window-management parts of `OverlayWindow.ts` | Builds the layer-shell surface, toggles click-through and keyboard focus, and handles Escape and Ctrl+W while a widget is interactive. Injects `hotkey_ui_info.js`, which points the renderer's Hotkeys settings at KDE |
+| `server.rs` | `server.ts`, IPC bus | Serves the renderer's `dist/` over HTTP and runs the WebSocket event bus that replaces Electron IPC |
+| `ipc.rs` | `ipc/types.ts` | Defines every WebSocket event and the `/config` body as Rust types. `cargo test` checks them against upstream's TypeScript with `tsc` |
+| `shortcuts.rs` | `shortcuts/Shortcuts.ts` | Registers the renderer's configured hotkeys with the `GlobalShortcuts` portal and runs their actions, such as price-check, toggle-overlay and copy-item. Closes the popup when the cursor leaves it |
+| `host_config.rs` | config parsing parts of `Shortcuts.ts`/`ConfigStore.ts` | Parses the renderer's `update-host-config` shortcut list and `restoreClipboard` flag. Registers every configurable action with KDE up front, so each one can be bound in System Settings → Shortcuts |
+| `remote_input.rs` | `HostClipboard.ts`, synthetic key presses | Presses Ctrl+C, reads the clipboard until item text appears, and restores the old contents. Uses the `RemoteDesktop`/`ConnectToEIS` and `Clipboard` portals (libei), the only portal-sanctioned way to inject input or use the clipboard on Wayland |
+| `kwin_tracker.rs` | window-tracking parts of `OverlayWindow.ts` | Runs a persistent KWin script over D-Bus that reports window activation and geometry. Uses it to find PoE, follow it across monitors and reset the overlay when PoE regains focus. Also queries the cursor position |
+| `proxy.rs` | `proxy.ts` | Forwards renderer requests to poe.ninja and pathofexile.com, with upstream's host allowlist and User-Agent override |
+| `config_store.rs` | `ConfigStore.ts` | Saves the renderer's settings to disk without parsing them |
+| `uploads.rs` | upload handling | Stores uploaded screenshots and images and serves them over HTTP |
+| `logger.rs` | `RemoteLogger.ts` | Keeps an in-memory log and replays it to each new WebSocket client |
 
 ## Status
 
-This is a working spike, not a polished release. Known differences from real
-APT: no Ctrl+scroll stash-tab navigation, no `logKeys` key logging, no
-game-log watcher (the pinned renderer discards its lines anyway), and no
-Windows-only OCR or self-updater.
+This is an early working version, not a polished release. Compared with APT,
+it has no Ctrl+scroll stash-tab navigation, no `logKeys` key logging, no
+game-log watcher, no Windows-only OCR and no self-updater. The pinned
+renderer discards game-log lines anyway.
 
 ## Requirements
 
-- KDE Plasma on Wayland (relies on KWin's scripting D-Bus interface and
-  `xdg-desktop-portal-kde` specifically — other compositors/portal
-  backends are untested and likely won't work as-is)
-- Rust (2024 edition toolchain)
-- `webkit2gtk-6.0` / `gtk4-layer-shell` system libraries (dev packages for
-  whichever your distro calls them)
-- Node.js + npm, only for the one-time renderer build
+- KDE Plasma on Wayland. The host needs KWin's scripting D-Bus interface
+  and `xdg-desktop-portal-kde`. Other compositors and portal backends are
+  untested and probably won't work.
+- Rust with the 2024 edition
+- The `webkitgtk-6.0` and `gtk4-layer-shell` libraries, plus their dev
+  packages if your distro ships them separately
+- Node.js and npm, to build the renderer and to run `cargo test`, which uses
+  the renderer's `tsc`
 
 ## Building
 
 ```sh
 git submodule update --init
 
-# Build the vendored, unmodified renderer (only needed once, or after
-# updating the submodule):
+# Builds the unmodified renderer. Run it once, and again after updating
+# the submodule.
 ./scripts/build-renderer.sh
 
 cargo build --release
 ```
 
-### Installing on Arch/CachyOS via the included PKGBUILD
+### Testing
+
+Run `./scripts/build-renderer.sh` once before testing.
+
+```sh
+cargo test
+```
+
+Along with the unit tests, `cargo test` checks the Rust code against the
+vendored upstream. It exports the event types in `src/ipc.rs` to TypeScript
+and type-checks them with `tsc` against `ipc/types.ts`. Then
+`tests/upstream_contract.rs` checks that the renderer still has the text and
+markup the injected Settings script looks for.
+
+### Installing on Arch or CachyOS with the PKGBUILD
 
 ```sh
 git clone https://github.com/thwonghin/apt-kwin-overlay.git
@@ -91,8 +98,8 @@ cd apt-kwin-overlay
 makepkg -si
 ```
 
-Installs the `apt-kwin-overlay` binary to `/usr/bin` and its renderer
-assets to `/usr/share/apt-kwin-overlay/dist`.
+This installs the `apt-kwin-overlay` binary to `/usr/bin` and the renderer
+to `/usr/share/apt-kwin-overlay/dist`.
 
 ## Running
 
@@ -100,28 +107,31 @@ assets to `/usr/share/apt-kwin-overlay/dist`.
 cargo run --release
 ```
 
-On first run you'll be prompted by KDE's portal to grant:
-global shortcuts, remote desktop (input injection), screencast (part of
-the RemoteDesktop session), and clipboard access. These are required for
-hotkeys and price-check to work at all.
+On first run, KDE's portal asks for four permissions. Hotkeys and
+price-check need all of them.
 
-The overlay is a transparent, click-through, always-on-top layer-shell
-surface. Toggle it and trigger a price-check with the same default hotkeys
-as stock APT (Shift+Space to toggle, Ctrl+D to price-check, Ctrl+Alt+D for a
-locked price-check). While a popup is open, Escape or Ctrl+W closes it too.
+- Global shortcuts
+- Remote desktop, to inject input
+- Screencast, which comes with the remote desktop session
+- Clipboard access
 
-To change hotkeys, use KDE's own **System Settings → Shortcuts** (search for
-"apt-kwin-overlay") rather than APT's in-overlay Hotkeys/Item Info Settings
-tabs — those are replaced with a banner pointing here, since KDE's
-`GlobalShortcuts` portal has no way for this app to silently rebind an
-already-granted key the way Electron's global-shortcut API did (see
-`host_config.rs`'s doc comments for the empirical detail).
+The overlay is a transparent, click-through layer-shell surface that stays
+above other windows. It uses stock APT's default hotkeys. Shift+Space
+toggles the overlay, Ctrl+D runs a price-check and Ctrl+Alt+D runs a locked
+price-check. Escape or Ctrl+W closes an open popup.
 
-For troubleshooting, `APT_KWIN_OVERLAY_DEBUG=1 cargo run --release` also
-prints per-event detail to the terminal (window activations, hotkey
-dispatch, popup tracking).
+To change hotkeys, open KDE's System Settings → Shortcuts and search for
+"apt-kwin-overlay". APT's own Hotkeys and Item Info settings tabs show a
+banner pointing there instead. KDE's `GlobalShortcuts` portal gives the app
+no way to rebind a key the user already granted, which Electron's
+global-shortcut API could do. The doc comments in `host_config.rs` have the
+details.
+
+To troubleshoot, run `APT_KWIN_OVERLAY_DEBUG=1 cargo run --release`. The
+terminal then also shows window activations, hotkey dispatch and popup
+tracking.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The vendored `awakened-poe-trade` submodule
-keeps its own MIT license.
+MIT, see [LICENSE](LICENSE). The vendored `awakened-poe-trade` submodule has
+its own MIT license.
