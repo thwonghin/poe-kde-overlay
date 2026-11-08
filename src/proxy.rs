@@ -28,6 +28,15 @@ const STRIPPED_REQUEST_HEADERS: &[&str] = &["host", "origin", "content-length", 
 const OUTBOUND_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
+/// Request headers passed on upstream (proxy.ts's delete loop); keys are
+/// already lowercased by server.rs.
+fn forwarded_headers(headers: &HashMap<String, String>) -> impl Iterator<Item = (&str, &str)> {
+    headers
+        .iter()
+        .filter(|(key, _)| !key.starts_with("sec-") && !STRIPPED_REQUEST_HEADERS.contains(&key.as_str()))
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+}
+
 pub fn handle(
     stream: &mut TcpStream,
     method: &str,
@@ -58,11 +67,6 @@ pub fn handle(
             .build()
             .into()
     });
-    let forwarded_headers: Vec<(&str, &str)> = headers
-        .iter()
-        .filter(|(key, _)| !key.starts_with("sec-") && !STRIPPED_REQUEST_HEADERS.contains(&key.as_str()))
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
 
     // Method passed through like proxy.ts's `method: req.method`; a body
     // is only sent when the client sent one.
@@ -70,8 +74,8 @@ pub fn handle(
         .method(method)
         .uri(&url)
         .header("user-agent", OUTBOUND_USER_AGENT);
-    for (key, value) in &forwarded_headers {
-        request = request.header(*key, *value);
+    for (key, value) in forwarded_headers(headers) {
+        request = request.header(key, value);
     }
     let result = if body.is_empty() {
         request.body(()).map_err(ureq::Error::from).and_then(|r| agent.run(r))
@@ -115,5 +119,23 @@ pub fn handle(
             logger.error(&format!("[proxy] request to {host} failed: {err}"));
             write_response(stream, 502, "text/plain", b"proxy error")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwards_only_non_identifying_headers() {
+        let headers: HashMap<String, String> = [
+            "host", "origin", "content-length", "user-agent", "sec-fetch-mode", "accept", "cookie",
+        ]
+        .iter()
+        .map(|k| (k.to_string(), "v".to_string()))
+        .collect();
+        let mut forwarded: Vec<_> = forwarded_headers(&headers).map(|(k, _)| k).collect();
+        forwarded.sort();
+        assert_eq!(forwarded, ["accept", "cookie"]);
     }
 }

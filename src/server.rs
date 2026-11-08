@@ -235,7 +235,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
         ui_request_rx,
         host_config_rx,
     };
-    let config = Arc::new(ConfigStore::new());
+    let config = Arc::new(ConfigStore::new(crate::config_store::config_path()));
     let logger = server.logger.clone();
 
     std::thread::spawn(move || {
@@ -648,6 +648,11 @@ mod tests {
         assert!(get("/uploads/../../../../etc/passwd").starts_with("HTTP/1.1 404"));
         let big = raw_request(port, "POST /uploads/a.png HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n");
         assert!(big.starts_with("HTTP/1.1 413"), "{big}");
+        // Proxy allowlist is exact-host: no lookalikes, no userinfo tricks
+        // (all rejected before any network request).
+        for path in ["/proxy/evil.example/x", "/proxy/poe.ninja.evil.example/x", "/proxy/poe.ninja@evil.example/x"] {
+            assert!(get(path).starts_with("HTTP/1.1 403"), "{path}");
+        }
 
         let ws = |origin: &str| {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -715,6 +720,45 @@ mod tests {
             }
         };
         assert!(matches!(request, UiRequest::Quit));
+    }
+
+    #[test]
+    fn last_active_routing_and_retrust_on_close() {
+        let (bus, _ui, _cfg) = EventBus::new();
+        let mut inboxes = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            ids.push(bus.add_client(Client { tx, poller: Arc::new(polling::Poller::new().unwrap()) }));
+            inboxes.push(rx);
+        }
+        let received = |inboxes: &[std::sync::mpsc::Receiver<String>]| -> Vec<usize> {
+            (0..inboxes.len()).filter(|&i| inboxes[i].try_recv().is_ok()).collect()
+        };
+
+        // A newly connected client is last-active; used-recently moves it.
+        bus.send_last_active("e", Value::Null);
+        assert_eq!(received(&inboxes), [2]);
+        bus.mark_active(ids[0]);
+        bus.send_last_active("e", Value::Null);
+        assert_eq!(received(&inboxes), [0]);
+        bus.broadcast("e", Value::Null);
+        assert_eq!(received(&inboxes), [0, 1, 2]);
+
+        // A browser tab reported isOverlay:false.
+        bus.set_overlay_active(false);
+        // Closing a client that isn't last-active changes nothing.
+        bus.remove_client(ids[2]);
+        assert!(!bus.overlay_was_used_recently());
+        bus.send_last_active("e", Value::Null);
+        assert_eq!(received(&inboxes), [0]);
+
+        // Closing the last-active one leaves exactly one: it inherits
+        // last-active and is re-trusted as the overlay (server.ts).
+        bus.remove_client(ids[0]);
+        assert!(bus.overlay_was_used_recently());
+        bus.send_last_active("e", Value::Null);
+        assert_eq!(received(&inboxes), [1]);
     }
 
     #[test]

@@ -11,14 +11,14 @@ pub struct ConfigStore {
     path: Mutex<std::path::PathBuf>,
 }
 
-fn config_path() -> std::path::PathBuf {
+pub fn config_path() -> std::path::PathBuf {
     crate::xdg::data_dir().join("apt-kwin-overlay/config.json")
 }
 
 impl ConfigStore {
-    pub fn new() -> Self {
+    pub fn new(path: std::path::PathBuf) -> Self {
         Self {
-            path: Mutex::new(config_path()),
+            path: Mutex::new(path),
         }
     }
 
@@ -39,5 +39,33 @@ impl ConfigStore {
         if let Err(err) = std::fs::write(&*path, contents) {
             logger.error(&format!("[config_store] failed to save config: {err}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_save_switches_to_tmp_file_for_good() {
+        let dir = std::env::temp_dir().join(format!("apt-config-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.json");
+        let store = ConfigStore::new(path.clone());
+        let logger = Arc::new(Logger::new(Arc::new(crate::server::EventBus::new().0)));
+
+        store.save("real", false, &logger);
+        assert_eq!(store.load().as_deref(), Some("real"));
+
+        // ConfigStore.ts: once a temporary save happened, every later save
+        // (temporary or not) goes to config.json.tmp; config.json is left alone.
+        store.save("tmp1", true, &logger);
+        store.save("tmp2", false, &logger);
+        assert_eq!(store.load().as_deref(), Some("tmp2"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "real");
+        assert_eq!(std::fs::read_to_string(dir.join("config.json.tmp")).unwrap(), "tmp2");
+        assert!(!dir.join("config.json.tmp.tmp").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

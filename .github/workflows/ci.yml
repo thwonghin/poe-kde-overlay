@@ -64,6 +64,11 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # The script WebKit injects into the Settings window; a syntax error
+      # there fails silently at runtime (no banner), not at build time.
+      - name: Check injected JS syntax
+        run: node --check src/hotkey_ui_info.js
+
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
 

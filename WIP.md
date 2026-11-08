@@ -45,6 +45,16 @@ From a full read of `src/` plus CI/packaging (2026-11-07). Fixed so far:
   - (docs) Dropped "500ms KWin script timeout is a guess": cursor queries measure
     1.0ms median, 1.8ms max (50 queries against a live KWin), so 500ms is
     over 250× headroom.
+- **PLACEHOLDER** Tests and CI:
+  - `tests/upstream_contract.rs` fails if an IPC event name `src/` uses
+    (scanned from string literals), a payload field, a Settings-banner
+    i18n key or its English text, or the PriceCheckWindow.vue track-area
+    handshake disappears from the vendored upstream.
+  - The injected Settings script lives in `src/hotkey_ui_info.js`
+    (`include_str!`); CI runs `node --check` on it.
+  - Unit tests: last-active routing and re-trust on close (`server.rs`),
+    exact-host proxy allowlist and stripped headers, and the sticky
+    `.tmp` config switch (`ConfigStore` now takes its path).
 
 Nothing open beyond the deliberate simplifications below.
 
