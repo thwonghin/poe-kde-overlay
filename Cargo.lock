@@ -20,6 +20,7 @@ dependencies = [
  "gtk4-layer-shell",
  "ksni",
  "md-5",
+ "polling",
  "reis",
  "serde",
  "serde_json",

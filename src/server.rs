@@ -42,13 +42,14 @@ const MAX_BODY_BYTES: usize = 16_000_000;
 type ClientId = u64;
 
 // The socket itself is owned by its connection thread (handle_websocket),
-// never shared: senders just queue text here and that thread writes it out
-// between reads. Sharing the socket behind a Mutex let the reader (which
-// re-locks immediately after each 15ms read timeout) starve senders —
-// confirmed live, the GTK main thread blocked 4.4s in send_last_active,
-// freezing every hotkey and delaying the price-check popup.
+// never shared: senders just queue text here and `notify` the thread's
+// poller, which wakes it to write the queue out. Sharing the socket behind
+// a Mutex let the reader starve senders — confirmed live, the GTK main
+// thread blocked 4.4s in send_last_active, freezing every hotkey and
+// delaying the price-check popup.
 struct Client {
     tx: std::sync::mpsc::Sender<String>,
+    poller: Arc<polling::Poller>,
 }
 
 /// `ipc/types.ts`'s `IpcTrackArea` payload, in the overlay WebView's CSS
@@ -134,12 +135,9 @@ impl EventBus {
         )
     }
 
-    fn add_client(&self, tx: std::sync::mpsc::Sender<String>) -> ClientId {
+    fn add_client(&self, client: Client) -> ClientId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.clients
-            .lock()
-            .unwrap()
-            .insert(id, Arc::new(Client { tx }));
+        self.clients.lock().unwrap().insert(id, Arc::new(client));
         *self.last_active.lock().unwrap() = Some(id);
         id
     }
@@ -187,7 +185,9 @@ impl EventBus {
 
     fn send_to(&self, client: &Arc<Client>, msg: &str) {
         // Never blocks; a send error just means the connection thread is gone.
-        let _ = client.tx.send(msg.to_string());
+        if client.tx.send(msg.to_string()).is_ok() {
+            let _ = client.poller.notify();
+        }
     }
 
     pub fn broadcast(&self, name: &str, payload: Value) {
@@ -286,9 +286,6 @@ fn handle_websocket(
     config: &Arc<ConfigStore>,
     logger: &Arc<Logger>,
 ) -> std::io::Result<()> {
-    // Bounds how long a queued outgoing message waits for the current
-    // blocking read to time out before this thread gets to write it.
-    stream.set_read_timeout(Some(Duration::from_millis(15)))?;
     // WebSockets aren't covered by CORS, so without this any web page that
     // finds our port could drive the overlay (save-config, quit, typing
     // into PoE via stash-search). The renderer always connects same-origin
@@ -319,32 +316,73 @@ fn handle_websocket(
         }
     };
 
+    // Sleeps until the socket is readable (or, with output still buffered,
+    // writable) or a sender `notify`s — no idle wakeups, and queued messages
+    // go out immediately. Non-blocking so tungstenite returns WouldBlock
+    // instead of stalling; it keeps partial frames buffered and resumes.
+    ws.get_ref().set_nonblocking(true)?;
+    let poller = Arc::new(polling::Poller::new()?);
+    // SAFETY: deleted from the poller below, before `ws` (the socket) drops.
+    unsafe { poller.add(ws.get_ref(), polling::Event::readable(0))? };
+
     let (tx, rx) = std::sync::mpsc::channel::<String>();
-    let id = events.add_client(tx);
+    let id = events.add_client(Client {
+        tx,
+        poller: poller.clone(),
+    });
     println!("[server] websocket client {id} connected");
     events.send_last_active(
         "MAIN->CLIENT::log-entry",
         json!({ "message": logger.history() }),
     );
 
+    let would_block = |err: &tungstenite::Error| {
+        matches!(err, tungstenite::Error::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+    };
+    let mut events_buf = polling::Events::new();
     'conn: loop {
-        match ws.read() {
-            Ok(tungstenite::Message::Text(text)) => {
-                handle_client_event(&text, id, events, config, logger);
+        loop {
+            match ws.read() {
+                Ok(tungstenite::Message::Text(text)) => {
+                    handle_client_event(&text, id, events, config, logger);
+                }
+                Ok(tungstenite::Message::Close(_)) => break 'conn,
+                Ok(_) => {}
+                Err(err) if would_block(&err) => break,
+                Err(_) => break 'conn,
             }
-            Ok(tungstenite::Message::Close(_)) => break,
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(ref io_err))
-                if io_err.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(_) => break,
         }
         while let Ok(msg) = rx.try_recv() {
-            if ws.send(tungstenite::Message::Text(msg.into())).is_err() {
-                break 'conn;
+            match ws.write(tungstenite::Message::Text(msg.into())) {
+                Ok(()) => {}
+                // Kept in tungstenite's write buffer; the flush below retries.
+                Err(err) if would_block(&err) => {}
+                Err(_) => break 'conn,
             }
+        }
+        // Whether tungstenite still holds output because the socket is full.
+        let unflushed = match ws.flush() {
+            Ok(()) => false,
+            Err(err) if would_block(&err) => true,
+            Err(_) => break 'conn,
+        };
+
+        let interest = if unflushed {
+            polling::Event::all(0)
+        } else {
+            polling::Event::readable(0)
+        };
+        // Oneshot mode: interest is re-armed before every wait.
+        if poller.modify(ws.get_ref(), interest).is_err() {
+            break;
+        }
+        events_buf.clear();
+        if poller.wait(&mut events_buf, None).is_err() {
+            break;
         }
     }
 
+    let _ = poller.delete(ws.get_ref());
     events.remove_client(id);
     println!("[server] websocket client {id} disconnected");
     Ok(())
@@ -626,6 +664,57 @@ mod tests {
         };
         assert!(ws("https://evil.example").starts_with("HTTP/1.1 403"));
         assert!(ws(&format!("http://127.0.0.1:{port}")).starts_with("HTTP/1.1 101"));
+    }
+
+    #[test]
+    fn websocket_delivers_both_ways_without_polling_delay() {
+        use tungstenite::client::IntoClientRequest;
+
+        let (port, server) = spawn().unwrap();
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let request = format!("ws://127.0.0.1:{port}/events").into_client_request().unwrap();
+        let (mut ws, _) = tungstenite::client(request, stream).unwrap();
+        let mut next_text = || loop {
+            if let tungstenite::Message::Text(text) = ws.read().unwrap() {
+                break serde_json::from_str::<Value>(&text).unwrap();
+            }
+        };
+
+        // Replayed log history is the first thing a new client gets.
+        assert_eq!(next_text()["name"], "MAIN->CLIENT::log-entry");
+
+        // Server → client, immediately (was up to one 15ms read timeout).
+        let started = std::time::Instant::now();
+        server.events.broadcast("MAIN->CLIENT::test", json!({ "n": 1 }));
+        assert_eq!(next_text()["payload"]["n"], 1);
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        // Bigger than any socket buffer: exercises the WouldBlock/flush path.
+        let big = "x".repeat(8 * 1024 * 1024);
+        server.events.broadcast("MAIN->CLIENT::big", json!({ "s": big }));
+        server.events.broadcast("MAIN->CLIENT::after-big", Value::Null);
+        assert_eq!(next_text()["payload"]["s"].as_str().unwrap().len(), big.len());
+        assert_eq!(next_text()["name"], "MAIN->CLIENT::after-big");
+
+        // Client → server.
+        ws.send(tungstenite::Message::Text(
+            json!({ "name": "CLIENT->MAIN::user-action", "payload": { "action": "quit" } })
+                .to_string()
+                .into(),
+        ))
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let request = loop {
+            match server.ui_request_rx.try_recv() {
+                Ok(request) => break request,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(err) => panic!("no UiRequest: {err}"),
+            }
+        };
+        assert!(matches!(request, UiRequest::Quit));
     }
 
     #[test]
