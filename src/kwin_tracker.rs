@@ -8,6 +8,20 @@ const CALLBACK_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.Callback";
 const CALLBACK_PATH: &str = "/";
 const CURSOR_QUERY_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback";
 
+/// The renderer's `windowTitle` setting (CLIENT->MAIN::update-host-config),
+/// lowercased + trimmed. Real APT attaches by this title alone; we match it
+/// in addition to the built-in PoE 1/2 captions below. Empty until the
+/// renderer sends its config.
+static WINDOW_TITLE: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+pub fn set_window_title(title: &str) {
+    *WINDOW_TITLE.write().unwrap() = title.trim().to_ascii_lowercase();
+}
+
+fn configured_title() -> String {
+    WINDOW_TITLE.read().unwrap().clone()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowEvent {
     // Not read yet — kept for later matching a specific tracked window
@@ -34,7 +48,11 @@ impl WindowEvent {
     pub fn is_path_of_exile(&self) -> bool {
         let class = self.class_name.to_ascii_lowercase();
         let caption = self.caption.trim().to_ascii_lowercase();
-        class.contains("pathofexile") || caption == "path of exile" || caption == "path of exile 2"
+        let title = configured_title();
+        class.contains("pathofexile")
+            || caption == "path of exile"
+            || caption == "path of exile 2"
+            || (!title.is_empty() && caption == title)
     }
 
     /// True when this activation event is our own overlay surface, not some
@@ -295,16 +313,21 @@ pub async fn activate_path_of_exile(connection: &zbus::Connection) -> zbus::Resu
     let plugin_name = format!("apt-kwin-overlay-activate-{id}");
 
     // Mirrors WindowEvent::is_path_of_exile()'s matching -- keep in sync.
-    let script = r#"
+    let script = format!(
+        "var configuredTitle = {};\n{}",
+        serde_json::Value::String(configured_title()),
+        r#"
 var candidates = workspace.windowList().filter(function (w) {
     var className = (w.resourceClass || "").toLowerCase();
     var caption = (w.caption || "").trim().toLowerCase();
-    return className.indexOf("pathofexile") !== -1 || caption === "path of exile" || caption === "path of exile 2";
+    return className.indexOf("pathofexile") !== -1 || caption === "path of exile" || caption === "path of exile 2"
+        || (configuredTitle !== "" && caption === configuredTitle);
 });
 if (candidates.length > 0) {
     workspace.activeWindow = candidates[0];
 }
-"#;
+"#
+    );
 
     let script_path = std::env::temp_dir().join(format!("{plugin_name}.js"));
     std::fs::write(&script_path, script)?;
@@ -336,4 +359,32 @@ if (candidates.length > 0) {
     let _ = std::fs::remove_file(&script_path);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(caption: &str) -> WindowEvent {
+        WindowEvent {
+            id: String::new(),
+            class_name: "steam_app_1".to_string(),
+            caption: caption.to_string(),
+            pid: 0,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }
+    }
+
+    #[test]
+    fn matches_configured_window_title_in_addition_to_builtins() {
+        assert!(!window("PoE Custom").is_path_of_exile());
+        set_window_title("  PoE Custom ");
+        assert!(window("poe custom").is_path_of_exile());
+        assert!(window("Path of Exile").is_path_of_exile());
+        assert!(!window("Trade - Path of Exile - Browser").is_path_of_exile());
+        set_window_title("");
+    }
 }

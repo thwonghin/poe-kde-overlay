@@ -362,6 +362,7 @@ fn handle_client_event(
             );
             events.request_shortcut_update(parsed.shortcuts);
             events.request_restore_clipboard_update(parsed.restore_clipboard);
+            crate::kwin_tracker::set_window_title(&parsed.window_title);
         }
         "CLIENT->MAIN::user-action" => {
             if payload.get("action").and_then(Value::as_str) == Some("quit") {

@@ -1,7 +1,7 @@
 // Parses the subset of the renderer's HostConfig (ipc/types.ts) we act on:
-// the user's configured hotkey list and the restoreClipboard flag.
-// Everything else in that payload (clientLog/gameConfig/stashScroll/
-// overlayKey/logKeys/windowTitle/language) is intentionally not modeled
+// the user's configured hotkey list, the restoreClipboard flag, and
+// windowTitle. Everything else in that payload (clientLog/gameConfig/
+// stashScroll/overlayKey/logKeys/language) is intentionally not modeled
 // here — serde ignores unknown fields by default, so this just picks what
 // we use out of the full blob the renderer sends on
 // CLIENT->MAIN::update-host-config.
@@ -19,6 +19,8 @@ struct HostConfig {
     shortcuts: Vec<ShortcutAction>,
     #[serde(default, rename = "restoreClipboard")]
     restore_clipboard: bool,
+    #[serde(default, rename = "windowTitle")]
+    window_title: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,6 +183,7 @@ pub fn to_portal_trigger(shortcut: &str) -> String {
 pub struct ParsedHostConfig {
     pub shortcuts: Vec<ShortcutAction>,
     pub restore_clipboard: bool,
+    pub window_title: String,
 }
 
 pub fn parse_host_config(payload: &serde_json::Value, logger: &Arc<Logger>) -> ParsedHostConfig {
@@ -193,6 +196,7 @@ pub fn parse_host_config(payload: &serde_json::Value, logger: &Arc<Logger>) -> P
     ParsedHostConfig {
         shortcuts: filter_valid(parsed.shortcuts, logger),
         restore_clipboard: parsed.restore_clipboard,
+        window_title: parsed.window_title,
     }
 }
 
@@ -369,6 +373,7 @@ mod tests {
             ActionKind::TriggerEvent { ref target } if target == "delve-grid"
         ));
         assert!(parsed.restore_clipboard);
+        assert_eq!(parsed.window_title, "Path of Exile");
     }
 
     #[test]
