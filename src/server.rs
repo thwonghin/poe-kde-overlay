@@ -761,6 +761,56 @@ mod tests {
         assert_eq!(received(&inboxes), [1]);
     }
 
+    // update-host-config is left out: it sets kwin_tracker's global window
+    // title, which would race that module's own test.
+    #[test]
+    fn client_events_reach_their_handlers() {
+        let (bus, ui_rx, _cfg) = EventBus::new();
+        let events = Arc::new(bus);
+        let logger = Arc::new(Logger::new(events.clone()));
+        let dir = std::env::temp_dir().join(format!("apt-client-events-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = Arc::new(ConfigStore::new(dir.join("config.json")));
+        let (tx, inbox) = std::sync::mpsc::channel();
+        let id = events.add_client(Client { tx, poller: Arc::new(polling::Poller::new().unwrap()) });
+        let send = |event: Value| handle_client_event(&event.to_string(), id, &events, &config, &logger);
+
+        // save-config persists and echoes the contents to every client.
+        send(json!({ "name": "CLIENT->MAIN::save-config", "payload": { "contents": "{\"a\":1}", "isTemporary": false } }));
+        assert_eq!(config.load().as_deref(), Some("{\"a\":1}"));
+        let echoed: Value = serde_json::from_str(&inbox.try_recv().unwrap()).unwrap();
+        assert_eq!(echoed, json!({ "name": "MAIN->CLIENT::config-changed", "payload": { "contents": "{\"a\":1}" } }));
+        send(json!({ "name": "CLIENT->MAIN::save-config", "payload": { "contents": "t", "isTemporary": true } }));
+        assert!(dir.join("config.json.tmp").exists());
+
+        // used-recently carries whether the sender is the overlay.
+        send(json!({ "name": "CLIENT->MAIN::used-recently", "payload": { "isOverlay": false } }));
+        assert!(!events.overlay_was_used_recently());
+        send(json!({ "name": "CLIENT->MAIN::used-recently", "payload": { "isOverlay": true } }));
+        assert!(events.overlay_was_used_recently());
+
+        // track-area is stored; a malformed one is dropped, not stored.
+        send(json!({ "name": "OVERLAY->MAIN::track-area", "payload": {
+            "holdKey": "Alt", "closeThreshold": 40, "from": { "x": 0, "y": 0 },
+            "area": { "x": 1, "y": 2, "width": 3, "height": 4 }, "dpr": 1 } }));
+        assert_eq!(events.track_area().unwrap().hold_key, "Alt");
+        events.clear_track_area();
+        send(json!({ "name": "OVERLAY->MAIN::track-area", "payload": { "holdKey": "Alt" } }));
+        assert!(events.track_area().is_none());
+
+        // UI requests go to the GTK loop; unknown/garbage input is ignored.
+        send(json!({ "name": "OVERLAY->MAIN::focus-game" }));
+        send(json!({ "name": "CLIENT->MAIN::user-action", "payload": { "action": "stash-search", "text": "chaos" } }));
+        send(json!({ "name": "CLIENT->MAIN::user-action", "payload": { "action": "check-for-update" } }));
+        send(json!({ "name": "CLIENT->MAIN::nonsense" }));
+        handle_client_event("not json", id, &events, &config, &logger);
+        assert!(matches!(ui_rx.try_recv(), Ok(UiRequest::FocusGame)));
+        assert!(matches!(ui_rx.try_recv(), Ok(UiRequest::StashSearch(t)) if t == "chaos"));
+        assert!(ui_rx.try_recv().is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn safe_join_rejects_escapes() {
         let base = Path::new("/srv/dist");

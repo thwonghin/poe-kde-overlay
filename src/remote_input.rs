@@ -109,6 +109,55 @@ fn looks_like_item_text(text: &str) -> bool {
     ITEM_TEXT_SIGNATURES.iter().any(|sig| text.starts_with(sig))
 }
 
+/// One tick of `copy_item_text`'s clipboard poll.
+#[derive(Debug, PartialEq)]
+enum PollStep {
+    Found,
+    Wait,
+    /// Press Ctrl+C again (at most once per copy).
+    Recopy,
+    /// `changed`: some app took the clipboard during the poll.
+    TimedOut { changed: bool },
+}
+
+#[derive(Default)]
+struct ClipboardPoll {
+    changed: bool,
+    recopied: bool,
+}
+
+impl ClipboardPoll {
+    fn step(&mut self, pinged: bool, has_item_text: bool, elapsed_ms: u64) -> PollStep {
+        self.changed |= pinged;
+        if has_item_text {
+            return PollStep::Found;
+        }
+        // Checked before the recopy: a Ctrl+C sent after giving up would
+        // only reach the game.
+        if elapsed_ms >= CLIPBOARD_POLL_LIMIT_MS {
+            return PollStep::TimedOut { changed: self.changed };
+        }
+        // Another app took the clipboard, yet no item text: most likely
+        // PoE copied *before* our clear, which then overwrote it (the ping
+        // can be processed after the clear either way). Copy once more;
+        // harmless if that wasn't it.
+        if pinged && !self.recopied {
+            self.recopied = true;
+            return PollStep::Recopy;
+        }
+        PollStep::Wait
+    }
+}
+
+/// What `restore` writes back: the pre-copy clipboard, unless it looked
+/// like item text itself (stale or fresh can't be told apart).
+fn restore_value(previous: Option<&str>) -> &str {
+    match previous {
+        Some(text) if !looks_like_item_text(text) => text,
+        _ => "",
+    }
+}
+
 fn restore_token_path() -> std::path::PathBuf {
     crate::xdg::data_dir().join("apt-kwin-overlay/remote_desktop_restore_token")
 }
@@ -446,8 +495,7 @@ impl RemoteInput {
         // Wall-clock, not a tick count: a tick can cost up to
         // CLIPBOARD_READ_TIMEOUT_MS when a read hangs.
         let start = std::time::Instant::now();
-        let mut changed = false;
-        let mut recopied = false;
+        let mut poll = ClipboardPoll::default();
         let result = loop {
             // Usually ends early: PoE taking the clipboard pings
             // `text_copied`. The fixed delay is the fallback if the portal
@@ -456,7 +504,6 @@ impl RemoteInput {
             let pinged = crate::with_timeout(delay, self.text_copied.recv())
                 .await
                 .is_some_and(|r| r.is_ok());
-            changed |= pinged;
 
             let text = match self.read_clipboard_if_offered().await {
                 Ok(text) => text,
@@ -465,36 +512,29 @@ impl RemoteInput {
                     None
                 }
             };
-            if text.as_deref().is_some_and(looks_like_item_text) {
-                break text;
-            }
-            // Another app took the clipboard, yet no item text: most likely
-            // PoE copied *before* our clear above, which then overwrote it
-            // (the ping can be processed after the clear either way). Copy
-            // once more; harmless if that wasn't it.
-            if pinged && !recopied {
-                recopied = true;
-                debug!("[remote_input] clipboard changed without item text; copying again");
-                self.press_copy(keep_mod_keys);
-            }
-            if start.elapsed().as_millis() as u64 >= CLIPBOARD_POLL_LIMIT_MS {
-                self.logger.error(if changed {
-                    "[remote_input] clipboard poll timed out: the clipboard changed but never held item text"
-                } else {
-                    "[remote_input] clipboard poll timed out: the clipboard never changed (Ctrl+C not seen by PoE?)"
-                });
-                break None;
+            let has_item_text = text.as_deref().is_some_and(looks_like_item_text);
+            match poll.step(pinged, has_item_text, start.elapsed().as_millis() as u64) {
+                PollStep::Found => break text,
+                PollStep::Wait => {}
+                PollStep::Recopy => {
+                    debug!("[remote_input] clipboard changed without item text; copying again");
+                    self.press_copy(keep_mod_keys);
+                }
+                PollStep::TimedOut { changed } => {
+                    self.logger.error(if changed {
+                        "[remote_input] clipboard poll timed out: the clipboard changed but never held item text"
+                    } else {
+                        "[remote_input] clipboard poll timed out: the clipboard never changed (Ctrl+C not seen by PoE?)"
+                    });
+                    break None;
+                }
             }
         };
 
-        if restore {
-            let restore_value = match previous.as_deref() {
-                Some(text) if !looks_like_item_text(text) => text,
-                _ => "",
-            };
-            if let Err(err) = self.write_clipboard_text(restore_value).await {
-                self.logger.error(&format!("[remote_input] clipboard restore failed: {err}"));
-            }
+        if restore
+            && let Err(err) = self.write_clipboard_text(restore_value(previous.as_deref())).await
+        {
+            self.logger.error(&format!("[remote_input] clipboard restore failed: {err}"));
         }
 
         Ok(result)
@@ -684,5 +724,33 @@ mod tests {
         assert!(!looks_like_item_text(""));
         assert!(!looks_like_item_text("just some random clipboard text"));
         assert!(!looks_like_item_text("item class: lowercase doesn't count"));
+    }
+
+    #[test]
+    fn clipboard_poll_recopies_once_and_reports_why_it_timed_out() {
+        let mut poll = ClipboardPoll::default();
+        assert_eq!(poll.step(false, false, 48), PollStep::Wait);
+        // PoE copied before our clear: the ping brings no item text.
+        assert_eq!(poll.step(true, false, 60), PollStep::Recopy);
+        assert_eq!(poll.step(true, false, 100), PollStep::Wait, "only one recopy");
+        assert_eq!(poll.step(true, true, 110), PollStep::Found);
+
+        // Never pinged: times out saying the clipboard never changed.
+        let mut silent = ClipboardPoll::default();
+        assert_eq!(silent.step(false, false, CLIPBOARD_POLL_LIMIT_MS), PollStep::TimedOut { changed: false });
+        // Pinged earlier, still nothing: says it changed. No recopy on the
+        // tick that gives up.
+        let mut noisy = ClipboardPoll::default();
+        assert_eq!(noisy.step(false, false, 48), PollStep::Wait);
+        assert_eq!(noisy.step(true, false, CLIPBOARD_POLL_LIMIT_MS), PollStep::TimedOut { changed: true });
+        // Item text wins even past the limit.
+        assert_eq!(ClipboardPoll::default().step(false, true, 9999), PollStep::Found);
+    }
+
+    #[test]
+    fn restore_skips_item_text() {
+        assert_eq!(restore_value(Some("my notes")), "my notes");
+        assert_eq!(restore_value(Some("Item Class: Body Armours\nRarity: Rare")), "");
+        assert_eq!(restore_value(None), "");
     }
 }
