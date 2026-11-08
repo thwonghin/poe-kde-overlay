@@ -1,6 +1,7 @@
 # apt-kwin-overlay
 
-A native KWin/Wayland backend for [Awakened PoE Trade](https://github.com/SnosMe/awakened-poe-trade) (APT).
+A native KWin/Wayland backend for [Awakened PoE Trade](https://github.com/SnosMe/awakened-poe-trade) (APT),
+the Path of Exile price-check overlay, on Linux.
 
 APT's overlay uses Electron and X11 APIs for hotkeys, click-through, input
 injection and clipboard capture, so it doesn't work under Wayland. This
