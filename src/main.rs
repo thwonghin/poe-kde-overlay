@@ -125,8 +125,9 @@ pub(crate) struct Overlay {
     /// Bus with no clients, standing in while no game is active: sends go
     /// nowhere, the same as before any renderer connects.
     idle: Arc<server::EventBus>,
-    /// A switch reloaded the WebView: the new renderer's first host config
-    /// (its "ready" signal) gets the overlay-attached a fresh attach would.
+    /// A new PoE process was seen while its renderer was still loading: the
+    /// renderer's first host config (its "ready" signal) gets the
+    /// overlay-attached instead.
     attach_pending: Cell<bool>,
     tray_active: async_channel::Sender<Option<Game>>,
     pub logger: Arc<logger::Logger>,
@@ -177,13 +178,22 @@ impl Overlay {
         self.auto_close_gen.set(self.auto_close_gen.get() + 1);
         self.set_click_through(true);
         self.active.set(game);
+        // A toast still owed to the previous renderer isn't this one's.
+        self.attach_pending.set(false);
         let _ = self.tray_active.try_send(game);
+        // Navigating alone keeps the old page's memory: measured ~360 MB
+        // after unloading to about:blank vs ~175 MB with the web process
+        // killed, and 40-90 MB of the previous game lingering after a
+        // switch. The next load_uri spawns a fresh process.
         match game.and_then(|g| self.port_of(g)) {
             Some(port) => {
-                self.attach_pending.set(true);
+                self.webview.terminate_web_process();
                 self.webview.load_uri(&format!("http://127.0.0.1:{port}/"));
             }
-            None => self.webview.load_uri("about:blank"),
+            None => {
+                self.webview.load_uri("about:blank");
+                self.webview.terminate_web_process();
+            }
         }
     }
 
@@ -512,12 +522,16 @@ fn build_ui(app: &Application) {
 
     {
         let overlay = overlay.clone();
-        // PoE pid the overlay last attached to (`overlay-attached` sent).
-        let mut attached_pid = None;
+        // Per game, the PoE pid `overlay-attached` was last sent for.
+        let mut attached_pid: std::collections::HashMap<Game, i64> = Default::default();
+        // Bumped on every activation; a pending unload only fires if no
+        // activation came after it.
+        let focus_gen = Rc::new(Cell::new(0u64));
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
                     TrackerEvent::Activated(w) => {
+                        focus_gen.set(focus_gen.get() + 1);
                         // Our own layer-shell surface gets a genuine
                         // activation the moment it becomes keyboard-
                         // interactive (e.g. a locked price-check popup flips
@@ -532,20 +546,26 @@ fn build_ui(app: &Application) {
                                 "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
                                 w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                             );
+                            let shown = overlay.active.get();
                             // Class-only match (no game): keep what's shown.
                             if let Some(game) = w.game() {
                                 overlay.switch_game(Some(game));
                             }
                             move_overlay_to_window_monitor(&overlay, &w);
-                            // Real APT sends this whenever electron-overlay-window
-                            // attaches to a PoE window; drives the renderer's
-                            // "overlay ready" toast (LoadingAnimation.vue). A
-                            // new pid means the game was restarted. Right
-                            // after a switch the renderer is still loading;
-                            // attach_pending sends it once it's up.
-                            if attached_pid != Some(w.pid) {
-                                attached_pid = Some(w.pid);
-                                if !overlay.attach_pending.get() {
+                            // Upstream sends this on electron-overlay-window's
+                            // `attach`, i.e. once per PoE window: the
+                            // "overlay ready" toast (LoadingAnimation.vue, its
+                            // only consumer in both renderers). Upstream never
+                            // reloads, so our reloads (game switch, unload)
+                            // don't re-send it; a new pid (game restarted)
+                            // does. A renderer that just started loading gets
+                            // it via attach_pending once it's up.
+                            if let Some(game) = overlay.active.get()
+                                && attached_pid.insert(game, w.pid) != Some(w.pid)
+                            {
+                                if overlay.active.get() != shown {
+                                    overlay.attach_pending.set(true);
+                                } else {
                                     overlay.events().broadcast(&MainEvent::OverlayAttached);
                                 }
                             }
@@ -560,6 +580,20 @@ fn build_ui(app: &Application) {
                                 "[kwin_tracker] activated (not PoE): class={:?} caption={:?} pid={}",
                                 w.class_name, w.caption, w.pid
                             );
+                            // KWin reports no window-closed event, so "PoE
+                            // closed" and "tabbed out for long" look the
+                            // same: unload either way, freeing ~185 MB. The
+                            // renderer reloads (1-2 s) on next PoE focus.
+                            // ponytail: fixed 10 min, a setting if anyone
+                            // wants it shorter.
+                            let unfocused_at = focus_gen.get();
+                            let focus_gen = focus_gen.clone();
+                            let overlay = overlay.clone();
+                            glib::timeout_add_seconds_local_once(600, move || {
+                                if focus_gen.get() == unfocused_at {
+                                    overlay.switch_game(None);
+                                }
+                            });
                         }
                         overlay.active_window.replace(Some(w));
                     }
