@@ -7,9 +7,8 @@ the `vendor/awakened-poe-trade` submodule; `src/*.rs` reimplements
 
 ## Start here
 
-- **`WIP.md`** tracks open code-quality follow-ups. Read it before picking
-  up work; when an item closes, delete it in the same change (git history
-  records what was fixed).
+- Deliberate shortcuts are marked `ponytail:` in the code, each with its
+  ceiling; `grep -rn 'ponytail:' src` lists them.
 - Non-obvious decisions live as code comments at the call sites (e.g. why
   hotkeys are owned by KDE Global Shortcuts, why price-check presses Ctrl+C
   before the clipboard snapshot, why WebSocket sockets are thread-owned).
