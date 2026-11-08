@@ -41,13 +41,17 @@ Each module in `src/` reimplements one part of APT's and EE2's
 
 | Module | Replaces (upstream `main/src/*`) | Does |
 |---|---|---|
-| `game.rs` | — | The two games (poe1/poe2): each one's renderer, data dir, window caption and copy keys |
+| `game.rs` | — | The two games (poe1/poe2): each one's renderer, data dir and window caption |
 | `main.rs` | window-management parts of `OverlayWindow.ts` | Loads the focused game's renderer, builds the layer-shell surface, toggles click-through and keyboard focus, and handles Escape and Ctrl+W while a widget is interactive. Injects `hotkey_ui_info.js`, which points the renderer's Hotkeys settings at KDE |
 | `server.rs` | `server.ts`, IPC bus | One server per game. Serves that renderer's `dist/` over HTTP and runs the WebSocket event bus that replaces Electron IPC |
 | `ipc.rs` | `ipc/types.ts` | Defines every WebSocket event and the `/config` body as Rust types. `cargo test` checks them against upstream's TypeScript with `tsc` |
-| `shortcuts.rs` | `shortcuts/Shortcuts.ts` | Registers the renderer's configured hotkeys with the `GlobalShortcuts` portal and runs their actions, such as price-check, toggle-overlay and copy-item. Closes the popup when the cursor leaves it |
-| `host_config.rs` | config parsing parts of `Shortcuts.ts`/`ConfigStore.ts` | Parses the renderer's `update-host-config` shortcut list and `restoreClipboard` flag. Registers every configurable action with KDE up front, so each one can be bound in System Settings → Shortcuts |
-| `remote_input.rs` | `HostClipboard.ts`, synthetic key presses | Presses Ctrl+C (Ctrl+Alt+C in PoE2, for advanced mod text), reads the clipboard until item text appears, and restores the old contents. Uses the `RemoteDesktop`/`ConnectToEIS` and `Clipboard` portals (libei), the only portal-sanctioned way to inject input or use the clipboard on Wayland |
+| `shortcuts.rs` | `shortcuts/Shortcuts.ts` | Registers the renderer's configured hotkeys with the `GlobalShortcuts` portal and runs their actions, such as price-check, toggle-overlay and copy-item. Remembers every bound shortcut across launches, so KDE doesn't re-ask about them. Closes the popup when the cursor leaves it |
+| `host_config.rs` | config parsing parts of `Shortcuts.ts`/`ConfigStore.ts` | Parses the renderer's `update-host-config`: shortcuts, `restoreClipboard`, and the game-log, game-config and PoE2-only options. Registers every configurable action with KDE up front, so each one can be bound in System Settings → Shortcuts |
+| `remote_input.rs` | `HostClipboard.ts`, synthetic key presses | Presses Ctrl+C (plus PoE2's advanced-descriptions key), reads the clipboard until item text appears, and restores the old contents. Uses the `RemoteDesktop`/`ConnectToEIS` and `Clipboard` portals (libei), the only portal-sanctioned way to inject input or use the clipboard on Wayland |
+| `game_config.rs` | `host-files/GameConfig.ts` | Reads PoE2's advanced-descriptions key from `poe2_production_Config.ini`, found in the running game's Wine prefix if not configured |
+| `game_log.rs` | `host-files/GameLogWatcher.ts` | Tails each game's `Client.txt` (found through the game's own open files if not configured) and sends new lines to the renderer |
+| `library.rs` | `host-files/FileWriter.ts` | PoE2's experimental item library: writes library sessions to CSV and parsed game-log events to `client-log.ndjson` |
+| `overlay_visibility.rs` | `windowing/OverlayVisibility.ts` | Hides the overlay while Alt is held on its own |
 | `kwin_tracker.rs` | window-tracking parts of `OverlayWindow.ts` | Runs a persistent KWin script over D-Bus that reports window activation and geometry. Uses it to find PoE, tell PoE1 from PoE2 by window title, follow it across monitors and reset the overlay when PoE regains focus. Also queries the cursor position |
 | `proxy.rs` | `proxy.ts` | Forwards renderer requests to poe.ninja and pathofexile.com, with upstream's host allowlist and User-Agent override |
 | `config_store.rs` | `ConfigStore.ts` | Saves the renderer's settings to disk without parsing them |
@@ -58,11 +62,8 @@ Each module in `src/` reimplements one part of APT's and EE2's
 
 This is an early working version, not a polished release. Compared with APT
 and EE2, it has no Ctrl+scroll stash-tab navigation, no `logKeys` key
-logging, no game-log watcher, no Windows-only OCR and no self-updater. The
-pinned APT renderer discards game-log lines anyway. From EE2 it also leaves
-out the item library writer, the "hide overlay on blur" option and the
-configurable clipboard delay. PoE2 copies assume the default Alt key for
-advanced mod descriptions.
+logging, no Windows-only OCR and no self-updater. A hotkey pressed during
+the 1–2 s reload after switching games is lost.
 
 ## Requirements
 
@@ -98,10 +99,11 @@ cargo test
 Along with the unit tests, `cargo test` checks the Rust code against both
 vendored upstreams. It exports the event types in `src/ipc.rs` to TypeScript
 and type-checks them with each vendor's `tsc` against its `ipc/types.ts`.
-Drift tests check that the item-text signatures and proxy allowlist still
-match both vendors' `main/`. Then `tests/upstream_contract.rs` checks that
-both renderers still have the text and markup the injected Settings script
-looks for.
+Drift tests check that the item-text signatures, proxy allowlist, copy-item
+targets, guessed game-log and game-config paths, and PoE2's key codes still
+match both vendors' `main/` and `ipc/`. Then `tests/upstream_contract.rs`
+checks that both renderers still have the text and markup the injected
+Settings script looks for.
 
 ### Installing on Arch with the PKGBUILD
 
@@ -135,9 +137,10 @@ price-check. Escape or Ctrl+W closes an open popup.
 
 To change hotkeys, open KDE's System Settings → Shortcuts and search for
 "poe-kde-overlay". Both renderers' Hotkeys and Item Info settings tabs show a
-banner pointing there instead. KDE's `GlobalShortcuts` portal gives the app
-no way to rebind a key the user already granted, which Electron's
-global-shortcut API could do. The doc comments in `host_config.rs` have the
+banner pointing there instead; non-hotkey settings on those tabs (such as
+PoE2's search-same-priced "Filter by") stay editable. KDE's
+`GlobalShortcuts` portal gives the app no way to rebind a key the user
+already granted, which Electron's global-shortcut API could do. The doc comments in `host_config.rs` have the
 details.
 
 To troubleshoot, run `POE_KDE_OVERLAY_DEBUG=1 cargo run --release`. The
