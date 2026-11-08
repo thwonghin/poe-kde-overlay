@@ -421,7 +421,8 @@ impl RemoteInput {
         // Press *before* the snapshot/clear, unlike HostClipboard.ts: a
         // snapshot first reads whatever owned the clipboard before (often
         // not offering text) and trips the portal hang. Pressing first means
-        // PoE owns the selection by the time we read.
+        // PoE usually owns the selection by the time we read.
+        //
         // Drop a wake-up left over from an earlier copy; only one caused by
         // this Ctrl+C should end the first wait early.
         while self.text_copied.try_recv().is_ok() {}
@@ -445,12 +446,17 @@ impl RemoteInput {
         // Wall-clock, not a tick count: a tick can cost up to
         // CLIPBOARD_READ_TIMEOUT_MS when a read hangs.
         let start = std::time::Instant::now();
+        let mut changed = false;
+        let mut recopied = false;
         let result = loop {
             // Usually ends early: PoE taking the clipboard pings
             // `text_copied`. The fixed delay is the fallback if the portal
             // doesn't signal (upstream polls on this delay alone).
             let delay = std::time::Duration::from_millis(CLIPBOARD_POLL_DELAY_MS);
-            let _ = crate::with_timeout(delay, self.text_copied.recv()).await;
+            let pinged = crate::with_timeout(delay, self.text_copied.recv())
+                .await
+                .is_some_and(|r| r.is_ok());
+            changed |= pinged;
 
             let text = match self.read_clipboard_if_offered().await {
                 Ok(text) => text,
@@ -462,8 +468,21 @@ impl RemoteInput {
             if text.as_deref().is_some_and(looks_like_item_text) {
                 break text;
             }
+            // Another app took the clipboard, yet no item text: most likely
+            // PoE copied *before* our clear above, which then overwrote it
+            // (the ping can be processed after the clear either way). Copy
+            // once more; harmless if that wasn't it.
+            if pinged && !recopied {
+                recopied = true;
+                debug!("[remote_input] clipboard changed without item text; copying again");
+                self.press_copy(keep_mod_keys);
+            }
             if start.elapsed().as_millis() as u64 >= CLIPBOARD_POLL_LIMIT_MS {
-                self.logger.error("[remote_input] clipboard poll timed out, no item text found");
+                self.logger.error(if changed {
+                    "[remote_input] clipboard poll timed out: the clipboard changed but never held item text"
+                } else {
+                    "[remote_input] clipboard poll timed out: the clipboard never changed (Ctrl+C not seen by PoE?)"
+                });
                 break None;
             }
         };

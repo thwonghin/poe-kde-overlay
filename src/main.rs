@@ -49,19 +49,22 @@ pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
 // worded as a plain statement of where hotkeys live now (not as "this used
 // to work here" — this app's own hotkey editing UI never actually took
 // effect for most users anyway once ids became trigger-independent).
-// Detected by literal English marker text (renderer/public/data/en/
-// app_i18n.json) — only correct for the English locale; ponytail: good
-// enough for now, a non-English label just means the tab's original
-// content stays visible instead of being replaced, rather than anything
-// breaking:
+// Detected by marker label text, in English or the active UI language:
+// the script loads that language's renderer/public/data/<lang>/app_i18n.json
+// (the same file the renderer's i18n.ts uses, chosen by the `lang` attribute
+// it sets on <html>). English is always matched too, since untranslated keys
+// fall back to it (e.g. cmn-Hant has none of these three). If a translation
+// fails to load, a non-English tab just keeps its original content:
 //   - "Hotkeys" tab (renderer/src/web/settings/hotkeys.vue) — detected via
-//     its "You can clear hotkey by pressing Backspace" hint box, which is
+//     its "You can clear hotkey by pressing Backspace" hint box
+//     (`settings.clear_hotkey`), which is
 //     always the first thing that tab renders. Only that hint box and the
 //     rows container right after it get replaced/hidden — the stash-scroll
 //     radio is a later, unrelated real setting and stays untouched.
 //   - "Item info" tab (item-check/settings-item-check.vue) — no equivalent
 //     static hint box, so detected via its first hotkey row's own label
-//     ("Open item on wiki"). This tab's entire content is hotkey rows, so
+//     ("Open item on wiki", `item.open_on_wiki`). This tab's entire content
+//     is hotkey rows, so
 //     everything in it gets hidden, leaving just the banner.
 // Not annotated: stash-search/stopwatch/chat-command hotkey fields — a key
 // set there becomes that action's preferred KDE trigger the first time it's
@@ -76,12 +79,59 @@ pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
 // row stays visible; only that now-possibly-stale label text (its source
 // config value no longer reflects the real KDE-owned trigger) gets
 // replaced with a pointer to where the actual key now lives, found the
-// same way — by the literal English label of the row it's in.
+// same way — by the label of the row it's in (`price_check.auto_search`).
 const HOTKEY_UI_INFO_JS: &str = r#"
 (function () {
-  var CLEAR_HOTKEY_TEXT = 'You can clear hotkey by pressing Backspace';
-  var ITEM_CHECK_FIRST_LABEL = 'Open item on wiki';
-  var AUTO_SEARCH_LABEL = 'Perform an auto search, when pressing';
+  // Marker labels by app_i18n.json path; English first, then the active
+  // language's translation once loaded (see loadLanguage).
+  var MARKER_KEYS = {
+    clearHotkey: ['settings', 'clear_hotkey'],
+    itemCheckFirst: ['item', 'open_on_wiki'],
+    autoSearch: ['price_check', 'auto_search']
+  };
+  var markers = {
+    clearHotkey: ['You can clear hotkey by pressing Backspace'],
+    itemCheckFirst: ['Open item on wiki'],
+    autoSearch: ['Perform an auto search, when pressing']
+  };
+  var ENGLISH = {
+    clearHotkey: markers.clearHotkey[0],
+    itemCheckFirst: markers.itemCheckFirst[0],
+    autoSearch: markers.autoSearch[0]
+  };
+  var loadedLang = 'en';
+
+  function loadLanguage() {
+    var lang = document.documentElement.lang || 'en';
+    if (lang === loadedLang) return;
+    loadedLang = lang;
+    if (lang === 'en') {
+      for (var key in ENGLISH) markers[key] = [ENGLISH[key]];
+      return;
+    }
+    fetch('data/' + encodeURIComponent(lang) + '/app_i18n.json')
+      .then(function (r) { return r.json(); })
+      .then(function (messages) {
+        if (loadedLang !== lang) return; // switched again meanwhile
+        for (var key in MARKER_KEYS) {
+          var path = MARKER_KEYS[key];
+          var section = messages[path[0]];
+          var text = section && section[path[1]];
+          markers[key] = text ? [ENGLISH[key], text] : [ENGLISH[key]];
+        }
+        addHotkeyUiInfo();
+      })
+      .catch(function () {});
+  }
+
+  function matches(key, text) {
+    return markers[key].indexOf(text) !== -1;
+  }
+
+  function startsWithMarker(key, text) {
+    return markers[key].some(function (m) { return text.indexOf(m) === 0; });
+  }
+
   var BANNER_TEXT = 'Hotkeys are configured in KDE System Settings → Shortcuts.';
 
   function makeBanner() {
@@ -94,6 +144,7 @@ const HOTKEY_UI_INFO_JS: &str = r#"
   }
 
   function addHotkeyUiInfo() {
+    loadLanguage();
     // Hotkeys tab: the hint box + the rows container that follows it are
     // the only two children that are actually hotkey UI — the stash-scroll
     // radio (a real, unrelated setting) is a later sibling and stays put.
@@ -101,7 +152,7 @@ const HOTKEY_UI_INFO_JS: &str = r#"
     for (var i = 0; i < divs.length; i++) {
       var marker = divs[i];
       if (marker.dataset.aptBannerAdded) continue;
-      if (marker.textContent.trim() !== CLEAR_HOTKEY_TEXT) continue;
+      if (!matches('clearHotkey', marker.textContent.trim())) continue;
       var tabRoot = marker.parentElement;
       if (!tabRoot) continue;
       var rowsContainer = marker.nextElementSibling;
@@ -116,7 +167,7 @@ const HOTKEY_UI_INFO_JS: &str = r#"
     // hidden and the banner becomes the tab's only visible content.
     var labels = document.querySelectorAll('label');
     for (var j = 0; j < labels.length; j++) {
-      if (labels[j].textContent.trim().indexOf(ITEM_CHECK_FIRST_LABEL) !== 0) continue;
+      if (!startsWithMarker('itemCheckFirst', labels[j].textContent.trim())) continue;
       var firstRow = labels[j].parentElement;
       var tabRoot2 = firstRow ? firstRow.parentElement : null;
       if (!tabRoot2 || tabRoot2.dataset.aptBannerAdded) continue;
@@ -130,7 +181,7 @@ const HOTKEY_UI_INFO_JS: &str = r#"
     for (var k = 0; k < searchDivs.length; k++) {
       var el = searchDivs[k];
       if (el.dataset.aptLabelsFixed || el.children.length > 0) continue;
-      if (el.textContent.trim() !== AUTO_SEARCH_LABEL) continue;
+      if (!matches('autoSearch', el.textContent.trim())) continue;
       el.dataset.aptLabelsFixed = '1';
       var container = el.nextElementSibling;
       if (!container) continue;
