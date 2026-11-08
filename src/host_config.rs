@@ -1,7 +1,8 @@
 // Parses the subset of the renderer's HostConfig (ipc/types.ts) we act on:
 // the user's configured hotkey list, the restoreClipboard flag,
 // windowTitle, the Client.txt options (game_log.rs), gameConfig
-// (game_config.rs) and poe2's initialDelay/hideOverlayOnBlur. Everything else in that payload (stashScroll/
+// (game_config.rs) and poe2's initialDelay/hideOverlayOnBlur/library
+// options (library.rs). Everything else in that payload (stashScroll/
 // overlayKey/logKeys/language) is
 // intentionally not modeled
 // here — serde ignores unknown fields by default, so this just picks what
@@ -35,6 +36,13 @@ pub struct HostConfig {
     #[serde(default, rename = "hideOverlayOnBlur")]
     #[ts(optional)]
     hide_overlay_on_blur: Option<bool>,
+    /// poe2 only: its item library (library.rs).
+    #[serde(default, rename = "libraryAlpha")]
+    #[ts(optional)]
+    pub library_alpha: Option<bool>,
+    #[serde(default, rename = "libraryOutputPath")]
+    #[ts(optional = nullable)]
+    pub library_output_path: Option<String>,
     /// poe2 only; poe1 always reads Client.txt.
     #[serde(default, rename = "readClientLog")]
     #[ts(optional)]
@@ -370,6 +378,9 @@ pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
         copy_item("search-similar", false),
         // poe2 only; pressing it while poe1 is shown has no dispatch entry.
         copy_item("search-same-priced", false),
+        // poe2's item library ("Log item to csv"), keepModKeys like
+        // Config.ts registers it.
+        ShortcutAction { keep_mod_keys: true, ..copy_item("log-item", false) },
     ]
 }
 
@@ -458,8 +469,7 @@ mod tests {
     /// behind our banner).
     #[test]
     fn every_vendor_copy_item_target_is_registerable() {
-        // poe2's item library: its write-data event is ignored (ipc.rs).
-        const UNSUPPORTED: &[&str] = &["log-item"];
+        const UNSUPPORTED: &[&str] = &[];
         let ours: HashSet<String> = default_actions()
             .into_iter()
             .chain(extra_registerable_actions())

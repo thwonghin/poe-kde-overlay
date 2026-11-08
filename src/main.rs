@@ -20,6 +20,7 @@ mod game_config;
 mod game_log;
 mod host_config;
 mod ipc;
+mod library;
 mod kwin_tracker;
 mod logger;
 mod overlay_visibility;

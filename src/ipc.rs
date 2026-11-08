@@ -29,14 +29,40 @@ pub enum ClientEvent {
     UserAction(UserAction),
     #[serde(rename = "CLIENT->MAIN::save-config", rename_all = "camelCase")]
     SaveConfig { contents: String, is_temporary: bool },
-    // poe2 (EE2) only. render-state drives its opt-in hideOverlayOnBlur;
-    // write-data (its item library) is ignored.
+    // poe2 (EE2) only: render-state drives its opt-in hideOverlayOnBlur;
+    // write-data is its item library (library.rs).
     #[serde(rename = "OVERLAY->MAIN::render-state", rename_all = "camelCase")]
     RenderState { should_show: bool },
     #[serde(rename = "CLIENT->MAIN::write-data")]
-    WriteData(#[ts(type = "unknown")] serde::de::IgnoredAny),
+    WriteData(WriteData),
     #[serde(rename = "CLIENT->MAIN::re-parse-log")]
     ReparseLog,
+}
+
+/// poe2's `CLIENT->MAIN::write-data` (FileWriter.ts).
+#[derive(Debug, Deserialize, TS)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum WriteData {
+    LogItem { text: String },
+    Session {
+        start: bool,
+        #[serde(default)]
+        #[ts(optional)]
+        name: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        header: Option<String>,
+    },
+    /// `data` is written out verbatim, one JSON object per line.
+    ClientLogEvent {
+        #[ts(type = "unknown")]
+        data: serde_json::Value,
+        close: bool,
+    },
+    /// FileWriter.ts ignores other actions; hidden from the type check.
+    #[serde(other)]
+    #[ts(skip)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize, TS)]

@@ -5,6 +5,13 @@ PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
 
 ## Pending live check
 
+- **Item library** (`src/library.rs`). With Settings → General →
+  experimental features → Item Data Collection on, a library-widget
+  session writes `<name>.csv` (in libraryOutputPath, else
+  `~/.local/share/poe-kde-overlay/poe2/csv-data/`) with one row per
+  "Copy item (log-item)" press (bind it in KDE), and parsed Client.txt
+  events go to `client-log.ndjson`.
+
 - **`hideOverlayOnBlur` / `initialDelay`** (poe2). With hideOverlayOnBlur
   on, the overlay surface unmaps while PoE isn't focused (unless the
   overlay is interactive) or no widget wants showing
@@ -25,16 +32,7 @@ PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
   (search-same-priced)" shows up in System Settings → Shortcuts →
   poe-kde-overlay, bind it, and try it in PoE2.
 
-## Gaps
-
-1. **Item library.** EE2's `log-item` hotkey and `CLIENT->MAIN::write-data`
-   (`FileWriter.ts`). `write-data` is ignored, so the library tab does
-   nothing. `log-item` is listed as unsupported in the drift test. `re-parse-log`
-   should also flush its client-log channel (`ponytail:` in `server.rs`).
-
 ## Known limits (by design)
 
 - A hotkey pressed during the 1–2 s WebView reload after switching games
   is lost (`ponytail:` in `Overlay::switch_game`).
-- The first EE2 bump PR will be flagged "review needed". EE2's `main/src`
-  has files we don't reimplement (`FileWriter.ts`).

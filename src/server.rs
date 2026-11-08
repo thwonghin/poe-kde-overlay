@@ -76,6 +76,7 @@ pub struct EventBus {
     /// This game's Client.txt tail thread (game_log.rs); unset on the idle
     /// bus and in tests.
     game_log: OnceLock<std::sync::mpsc::Sender<crate::game_log::Command>>,
+    library: crate::library::Library,
 }
 
 impl EventBus {
@@ -96,6 +97,7 @@ impl EventBus {
                 host_config_tx,
                 track_area: Mutex::new(None),
                 game_log: OnceLock::new(),
+                library: Default::default(),
             },
             ui_request_rx,
             host_config_rx,
@@ -397,6 +399,11 @@ fn handle_client_event(
         }
         ClientEvent::FocusGame => events.request_ui(UiRequest::FocusGame),
         ClientEvent::UpdateHostConfig(config) => {
+            events.library.restart(
+                game,
+                config.library_alpha.unwrap_or(false),
+                config.library_output_path.clone(),
+            );
             events.game_log(crate::game_log::Command::Restart {
                 path: config.client_log.clone().unwrap_or_default(),
                 read: config.read_client_log.unwrap_or(true),
@@ -417,11 +424,12 @@ fn handle_client_event(
         ClientEvent::UserAction(
             UserAction::CheckForUpdate | UserAction::UpdateAndRestart | UserAction::Unknown,
         ) => {}
-        // ponytail: EE2 also flushes its FileWriter client-log channel here;
-        // write-data isn't implemented, so there's nothing to flush.
-        ClientEvent::ReparseLog => events.game_log(crate::game_log::Command::Reparse),
+        ClientEvent::ReparseLog => {
+            events.library.flush_client_log(logger);
+            events.game_log(crate::game_log::Command::Reparse);
+        }
         ClientEvent::RenderState { should_show } => events.request_ui(UiRequest::RenderState(should_show)),
-        ClientEvent::WriteData(_) => {}
+        ClientEvent::WriteData(data) => events.library.handle(data, logger),
         ClientEvent::SaveConfig { contents, is_temporary } => {
             config.save(&contents, is_temporary, logger);
             events.broadcast(&MainEvent::ConfigChanged { contents });
