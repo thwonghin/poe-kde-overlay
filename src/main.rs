@@ -16,6 +16,7 @@ pub(crate) fn debug_enabled() -> bool {
 
 mod config_store;
 mod game;
+mod game_log;
 mod host_config;
 mod ipc;
 mod kwin_tracker;
@@ -549,6 +550,9 @@ fn build_ui(app: &Application) {
                             let shown = overlay.active.get();
                             // Class-only match (no game): keep what's shown.
                             if let Some(game) = w.game() {
+                                if let Some((_, _, bus)) = overlay.games.iter().find(|(g, _, _)| *g == game) {
+                                    bus.game_log(game_log::Command::Pid(w.pid));
+                                }
                                 overlay.switch_game(Some(game));
                             }
                             move_overlay_to_window_monitor(&overlay, &w);

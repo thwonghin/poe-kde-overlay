@@ -71,6 +71,9 @@ pub struct EventBus {
     // Latest OVERLAY->MAIN::track-area (price-check popup bounds + holdKey),
     // read by shortcuts.rs's popup tracker on every poll.
     track_area: Mutex<Option<TrackArea>>,
+    /// This game's Client.txt tail thread (game_log.rs); unset on the idle
+    /// bus and in tests.
+    game_log: OnceLock<std::sync::mpsc::Sender<crate::game_log::Command>>,
 }
 
 impl EventBus {
@@ -90,6 +93,7 @@ impl EventBus {
                 ui_request_tx,
                 host_config_tx,
                 track_area: Mutex::new(None),
+                game_log: OnceLock::new(),
             },
             ui_request_rx,
             host_config_rx,
@@ -171,6 +175,12 @@ impl EventBus {
         }
     }
 
+    pub(crate) fn game_log(&self, command: crate::game_log::Command) {
+        if let Some(tx) = self.game_log.get() {
+            let _ = tx.send(command);
+        }
+    }
+
     fn request_ui(&self, request: UiRequest) {
         let _ = self.ui_request_tx.try_send(request);
     }
@@ -195,6 +205,7 @@ pub fn spawn(game: Game, logger: Arc<Logger>) -> std::io::Result<Server> {
     let events = Arc::new(event_bus);
     started_at_ms();
     logger.attach(events.clone());
+    let _ = events.game_log.set(crate::game_log::spawn(game, events.clone(), logger.clone()));
     let server = Server {
         game,
         port,
@@ -384,6 +395,10 @@ fn handle_client_event(
         }
         ClientEvent::FocusGame => events.request_ui(UiRequest::FocusGame),
         ClientEvent::UpdateHostConfig(config) => {
+            events.game_log(crate::game_log::Command::Restart {
+                path: config.client_log.clone().unwrap_or_default(),
+                read: config.read_client_log.unwrap_or(true),
+            });
             let parsed = crate::host_config::parse_host_config(config, logger);
             println!(
                 "[server] update-host-config received, {} shortcut(s) after filtering, restore_clipboard={}",
@@ -400,7 +415,10 @@ fn handle_client_event(
         ClientEvent::UserAction(
             UserAction::CheckForUpdate | UserAction::UpdateAndRestart | UserAction::Unknown,
         ) => {}
-        ClientEvent::RenderState(_) | ClientEvent::WriteData(_) | ClientEvent::ReparseLog => {}
+        // ponytail: EE2 also flushes its FileWriter client-log channel here;
+        // write-data isn't implemented, so there's nothing to flush.
+        ClientEvent::ReparseLog => events.game_log(crate::game_log::Command::Reparse),
+        ClientEvent::RenderState(_) | ClientEvent::WriteData(_) => {}
         ClientEvent::SaveConfig { contents, is_temporary } => {
             config.save(&contents, is_temporary, logger);
             events.broadcast(&MainEvent::ConfigChanged { contents });

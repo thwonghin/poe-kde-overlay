@@ -1,7 +1,8 @@
 // Parses the subset of the renderer's HostConfig (ipc/types.ts) we act on:
-// the user's configured hotkey list, the restoreClipboard flag, and
-// windowTitle. Everything else in that payload (clientLog/gameConfig/
-// stashScroll/overlayKey/logKeys/language) is intentionally not modeled
+// the user's configured hotkey list, the restoreClipboard flag,
+// windowTitle and the Client.txt options (game_log.rs). Everything else in
+// that payload (gameConfig/stashScroll/overlayKey/logKeys/language) is
+// intentionally not modeled
 // here — serde ignores unknown fields by default, so this just picks what
 // we use out of the full blob the renderer sends on
 // CLIENT->MAIN::update-host-config.
@@ -21,6 +22,12 @@ pub struct HostConfig {
     restore_clipboard: bool,
     #[serde(default, rename = "windowTitle")]
     window_title: String,
+    #[serde(default, rename = "clientLog")]
+    pub client_log: Option<String>,
+    /// poe2 only; poe1 always reads Client.txt.
+    #[serde(default, rename = "readClientLog")]
+    #[ts(optional)]
+    pub read_client_log: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]

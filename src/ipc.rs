@@ -29,9 +29,8 @@ pub enum ClientEvent {
     UserAction(UserAction),
     #[serde(rename = "CLIENT->MAIN::save-config", rename_all = "camelCase")]
     SaveConfig { contents: String, is_temporary: bool },
-    // poe2 (EE2) only, all ignored: render-state drives its opt-in
-    // hideOverlayOnBlur; write-data/re-parse-log are its item library and
-    // Client.txt re-parse, and we have no game-log watcher for either game.
+    // poe2 (EE2) only. Ignored: render-state drives its opt-in
+    // hideOverlayOnBlur; write-data is its item library.
     #[serde(rename = "OVERLAY->MAIN::render-state")]
     RenderState(#[ts(type = "unknown")] serde::de::IgnoredAny),
     #[serde(rename = "CLIENT->MAIN::write-data")]
@@ -108,6 +107,8 @@ pub enum MainEvent {
     HideExclusiveWidget,
     #[serde(rename = "MAIN->OVERLAY::overlay-attached")]
     OverlayAttached,
+    #[serde(rename = "MAIN->CLIENT::game-log")]
+    GameLog { lines: Vec<String> },
     #[serde(rename = "MAIN->OVERLAY::visibility", rename_all = "camelCase")]
     Visibility { is_visible: bool },
 }
