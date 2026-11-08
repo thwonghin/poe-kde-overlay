@@ -75,10 +75,9 @@ jobs:
         id: contract
         run: |
           # src/*.rs reimplements a slice of upstream's Electron main
-          # process (main/src/**) and the wire types it shares with the
-          # renderer (ipc/**) without a compiler enforcing the two stay in
-          # sync -- a green build here only proves both sides compile, not
-          # that message shapes/config schemas/allowlists still match.
+          # process (main/src/**). The Test step below checks the wire types
+          # (src/ipc.rs vs ipc/types.ts, via tsc), but not behavior or
+          # allowlists ported from main/src -- those need a human diff.
           # Excludes the two subtrees that are permanently out of scope
           # regardless of upstream changes (AppUpdater.ts:
           # stubbed, doesn't apply to a locally-built binary; vision/**:
@@ -96,11 +95,10 @@ jobs:
           {
             echo "body<<BODY_EOF"
             echo "Automated submodule bump to upstream's current HEAD."
-            echo "Renderer build and \`cargo build --release --locked\` both passed in this workflow run before this PR was opened."
             if [ -n "$changed" ]; then
               echo ""
               echo "### ⚠️ Vendor contract surface changed"
-              echo "This bump touches upstream file(s) that \`src/*.rs\` reimplements the wire contract of (see README.md's module table). A green build only means both sides *compile* — it does not confirm WebSocket/IPC message shapes, the config JSON schema, or allowlists still match. Diff the file(s) below against the corresponding \`src/*.rs\` module before merging:"
+              echo "This bump touches upstream file(s) that \`src/*.rs\` reimplements (see README.md's module table). \`cargo test\` checks the IPC message and config types; it does not check ported behavior (e.g. Shortcuts.ts, ConfigStore.ts logic) or allowlists (proxy hosts). Diff the file(s) below against the corresponding \`src/*.rs\` module before merging:"
               echo ""
               while IFS= read -r f; do
                 echo "- \`$f\`"
@@ -148,5 +146,6 @@ jobs:
           branch: bump-awakened-poe-trade
           title: ${{ steps.test.outcome == 'failure' && '❌ Bump awakened-poe-trade submodule (contract tests fail)' || steps.contract.outputs.title }}
           body: |
+            ${{ steps.test.outcome == 'failure' && format('❌ **`cargo test` failed**: upstream changed something `src/` relies on. See the Test step of {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) || 'Renderer build, `cargo build --release --locked` and `cargo test` (including the IPC type check against `ipc/types.ts`) passed in this workflow run.' }}
+
             ${{ steps.contract.outputs.body }}
-            ${{ steps.test.outcome == 'failure' && format('❌ **`cargo test` failed**: upstream changed something `src/` relies on. See the Test step of {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) || '' }}
