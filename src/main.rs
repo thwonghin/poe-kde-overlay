@@ -16,6 +16,7 @@ pub(crate) fn debug_enabled() -> bool {
 
 mod config_store;
 mod game;
+mod game_config;
 mod game_log;
 mod host_config;
 mod ipc;
@@ -140,6 +141,8 @@ pub(crate) struct Overlay {
     pub price_check_locked: Cell<bool>,
     /// The renderer's `restoreClipboard` setting.
     pub restore_clipboard: Cell<bool>,
+    /// The active game's gameConfig setting (game_config.rs).
+    pub game_config: RefCell<String>,
     /// Bumped to cancel `shortcuts::spawn_auto_close`'s poll loop
     /// (WidgetAreaTracker's removeListeners).
     pub auto_close_gen: Cell<u64>,
@@ -453,6 +456,7 @@ fn build_ui(app: &Application) {
         price_check_open: Cell::new(false),
         price_check_locked: Cell::new(false),
         restore_clipboard: Cell::new(false),
+        game_config: RefCell::new(String::new()),
         auto_close_gen: Cell::new(0),
         active_window: RefCell::new(None),
         kwin_connection: RefCell::new(None),
@@ -505,6 +509,7 @@ fn build_ui(app: &Application) {
                     overlay.events().broadcast(&MainEvent::OverlayAttached);
                 }
                 overlay.restore_clipboard.set(config.restore_clipboard);
+                overlay.game_config.replace(config.game_config);
                 let _ = shortcuts_tx.send(config.shortcuts).await;
             }
         });

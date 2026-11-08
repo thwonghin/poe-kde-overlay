@@ -374,8 +374,19 @@ async fn price_check(
         if cursor.is_some_and(|(_, _, poe_active)| !poe_active) {
             return None;
         }
+        // Off the main thread: a file read plus /proc lookups.
+        let show_mods_key = if game.holds_show_mods_key() {
+            let configured = overlay.game_config.borrow().clone();
+            let pid = overlay.active_window.borrow().as_ref().map(|w| w.pid);
+            let logger = overlay.logger.clone();
+            gtk4::gio::spawn_blocking(move || crate::game_config::show_mods_key(&configured, pid, &logger))
+                .await
+                .ok()
+        } else {
+            None
+        };
         let copied = remote
-            .copy_item_text(overlay.restore_clipboard.get(), shortcut, keep_mod_keys, game.copy_with_alt())
+            .copy_item_text(overlay.restore_clipboard.get(), shortcut, keep_mod_keys, show_mods_key.as_deref())
             .await;
         Some((cursor, copied))
     };

@@ -21,7 +21,6 @@ use crate::logger::Logger;
 // this KDE version even with the session granted; EIS is the path KWin's
 // remote-input backend (and KDE Connect) actually uses.
 const KEY_LEFTCTRL: u32 = 29;
-const KEY_LEFTALT: u32 = 56;
 const KEY_C: u32 = 46;
 
 // XKB modifier mask bits as reported by ei_keyboard.modifiers (depressed).
@@ -124,11 +123,29 @@ const ITEM_TEXT_SIGNATURES: &[&str] = &[
 /// modifiers the user already holds (`held`, an XKB depressed mask) aren't
 /// toggled, since injecting their release would clear the seat's state
 /// while the physical key is still down, breaking hold-to-pin.
-fn copy_sequence(with_alt: bool, held: u32) -> Vec<(u32, bool)> {
-    let mods: Vec<u32> = [(KEY_LEFTCTRL, MOD_CTRL, true), (KEY_LEFTALT, MOD_ALT, with_alt)]
+fn copy_sequence(show_mods_key: Option<&str>, held: u32) -> Vec<(u32, bool)> {
+    // mergeTwoHotkeys("Ctrl + C", showModsKey) minus C, in hotkeyToString's
+    // order: Ctrl, Shift, Alt, then any plain key.
+    let extra: Vec<&str> = show_mods_key.map_or(Vec::new(), |k| k.split(" + ").collect());
+    let mut keys: Vec<&str> = ["Ctrl", "Shift", "Alt"]
         .into_iter()
-        .filter(|&(_, mask, wanted)| wanted && held & mask == 0)
-        .map(|(key, _, _)| key)
+        .filter(|m| *m == "Ctrl" || extra.contains(m))
+        .collect();
+    for key in extra {
+        if !is_mod_key(key) && key != "C" && !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    let held_mask = |key: &str| match key {
+        "Ctrl" => MOD_CTRL,
+        "Shift" => MOD_SHIFT,
+        "Alt" => MOD_ALT,
+        _ => 0,
+    };
+    let mods: Vec<u32> = keys
+        .into_iter()
+        .filter(|key| held & held_mask(key) == 0)
+        .filter_map(key_to_evdev)
         .collect();
     let mut seq: Vec<(u32, bool)> = mods.iter().map(|&k| (k, true)).collect();
     seq.extend([(KEY_C, true), (KEY_C, false)]);
@@ -497,7 +514,7 @@ impl RemoteInput {
         restore: bool,
         hotkey: &str,
         keep_mod_keys: bool,
-        with_alt: bool,
+        show_mods_key: Option<&str>,
     ) -> ashpd::Result<Option<String>> {
         // Press *before* the snapshot/clear, unlike HostClipboard.ts: a
         // snapshot first reads whatever owned the clipboard before (often
@@ -508,7 +525,7 @@ impl RemoteInput {
         // this Ctrl+C should end the first wait early.
         while self.text_copied.try_recv().is_ok() {}
         self.release_shortcut_keys(hotkey, keep_mod_keys);
-        self.press_copy(keep_mod_keys, with_alt);
+        self.press_copy(keep_mod_keys, show_mods_key);
 
         let previous = match self.read_clipboard_if_offered().await {
             Ok(text) => text,
@@ -550,7 +567,7 @@ impl RemoteInput {
                 PollStep::Wait => {}
                 PollStep::Recopy => {
                     debug!("[remote_input] clipboard changed without item text; copying again");
-                    self.press_copy(keep_mod_keys, with_alt);
+                    self.press_copy(keep_mod_keys, show_mods_key);
                 }
                 PollStep::TimedOut { changed } => {
                     self.logger.error(if changed {
@@ -648,13 +665,13 @@ impl RemoteInput {
         self.depressed_mods.get()
     }
 
-    /// Ctrl(+Alt)+C (see `Game::copy_with_alt`) via `copy_sequence`.
+    /// Ctrl(+showModsKey)+C (game_config.rs) via `copy_sequence`.
     /// The held mask is only trusted with `keep_mod_keys`: otherwise
     /// release_shortcut_keys just injected releases it doesn't reflect yet.
-    fn press_copy(&self, keep_mod_keys: bool, with_alt: bool) {
+    fn press_copy(&self, keep_mod_keys: bool, show_mods_key: Option<&str>) {
         use ei::keyboard::KeyState::{Press, Released};
         let held = if keep_mod_keys { self.depressed_mods() } else { 0 };
-        let seq: Vec<_> = copy_sequence(with_alt, held)
+        let seq: Vec<_> = copy_sequence(show_mods_key, held)
             .into_iter()
             .map(|(key, down)| (key, if down { Press } else { Released }))
             .collect();
@@ -718,14 +735,21 @@ mod tests {
 
     #[test]
     fn copy_sequence_adds_alt_and_skips_held_mods() {
-        let (ctrl, alt, c) = (KEY_LEFTCTRL, KEY_LEFTALT, KEY_C);
-        assert_eq!(copy_sequence(false, 0), [(ctrl, true), (c, true), (c, false), (ctrl, false)]);
+        let (ctrl, alt, c) = (KEY_LEFTCTRL, key_to_evdev("Alt").unwrap(), KEY_C);
+        let (shift, z) = (key_to_evdev("Shift").unwrap(), key_to_evdev("Z").unwrap());
+        assert_eq!(copy_sequence(None, 0), [(ctrl, true), (c, true), (c, false), (ctrl, false)]);
         assert_eq!(
-            copy_sequence(true, 0),
+            copy_sequence(Some("Alt"), 0),
             [(ctrl, true), (alt, true), (c, true), (c, false), (alt, false), (ctrl, false)]
         );
-        assert_eq!(copy_sequence(true, MOD_CTRL), [(alt, true), (c, true), (c, false), (alt, false)]);
-        assert_eq!(copy_sequence(false, MOD_CTRL | MOD_ALT), [(c, true), (c, false)]);
+        assert_eq!(copy_sequence(Some("Alt"), MOD_CTRL), [(alt, true), (c, true), (c, false), (alt, false)]);
+        assert_eq!(copy_sequence(Some("Alt"), MOD_CTRL | MOD_ALT), [(c, true), (c, false)]);
+        // A rebound key, plain or with a modifier; Ctrl isn't pressed twice.
+        assert_eq!(
+            copy_sequence(Some("Shift + Z"), 0),
+            [(ctrl, true), (shift, true), (z, true), (c, true), (c, false), (z, false), (shift, false), (ctrl, false)]
+        );
+        assert_eq!(copy_sequence(Some("Ctrl"), 0), copy_sequence(None, 0));
     }
 
     #[test]

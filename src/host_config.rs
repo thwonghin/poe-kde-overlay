@@ -1,7 +1,8 @@
 // Parses the subset of the renderer's HostConfig (ipc/types.ts) we act on:
 // the user's configured hotkey list, the restoreClipboard flag,
-// windowTitle and the Client.txt options (game_log.rs). Everything else in
-// that payload (gameConfig/stashScroll/overlayKey/logKeys/language) is
+// windowTitle, the Client.txt options (game_log.rs) and gameConfig
+// (game_config.rs). Everything else in that payload (stashScroll/
+// overlayKey/logKeys/language) is
 // intentionally not modeled
 // here — serde ignores unknown fields by default, so this just picks what
 // we use out of the full blob the renderer sends on
@@ -24,6 +25,8 @@ pub struct HostConfig {
     window_title: String,
     #[serde(default, rename = "clientLog")]
     pub client_log: Option<String>,
+    #[serde(default, rename = "gameConfig")]
+    game_config: Option<String>,
     /// poe2 only; poe1 always reads Client.txt.
     #[serde(default, rename = "readClientLog")]
     #[ts(optional)]
@@ -287,6 +290,8 @@ pub struct ParsedHostConfig {
     pub shortcuts: Vec<ShortcutAction>,
     pub restore_clipboard: bool,
     pub window_title: String,
+    /// poe2's poe2_production_Config.ini ("" = find it).
+    pub game_config: String,
 }
 
 pub fn parse_host_config(parsed: HostConfig, logger: &Arc<Logger>) -> ParsedHostConfig {
@@ -294,6 +299,7 @@ pub fn parse_host_config(parsed: HostConfig, logger: &Arc<Logger>) -> ParsedHost
         shortcuts: filter_valid(parsed.shortcuts, logger),
         restore_clipboard: parsed.restore_clipboard,
         window_title: parsed.window_title,
+        game_config: parsed.game_config.unwrap_or_default(),
     }
 }
 

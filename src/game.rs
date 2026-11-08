@@ -60,12 +60,10 @@ impl Game {
     }
 
     /// PoE2 only copies advanced mod descriptions (tiers, ranges) with its
-    /// show_advanced_item_descriptions key held: EE2's Shortcuts.ts presses
-    /// Ctrl + showModsKey (default Alt) + C. APT 3.29 forces plain Ctrl+C,
-    /// since PoE1's Ctrl+C now always copies the advanced format.
-    /// ponytail: EE2 reads showModsKey from poe2_production_Config.ini; we
-    /// assume the default Alt. Parse the ini if someone rebinds it.
-    pub fn copy_with_alt(self) -> bool {
+    /// show_advanced_item_descriptions key held (game_config.rs). APT 3.29
+    /// forces plain Ctrl+C, since PoE1's Ctrl+C now always copies the
+    /// advanced format.
+    pub fn holds_show_mods_key(self) -> bool {
         self == Game::Poe2
     }
 }

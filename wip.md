@@ -5,8 +5,11 @@ PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
 
 ## Pending live check
 
-- **Game-log watcher** (`src/game_log.rs`). Works live in PoE2 (log found
-  via the game's open fds in a custom Wine prefix). Still check PoE1.
+- **Advanced-descriptions key** (`src/game_config.rs`). poe2 copies now
+  hold `show_advanced_item_descriptions` from poe2_production_Config.ini
+  (gameConfig, else the game's Wine prefix, else EE2's guesses), re-read
+  on every copy. Check the Log tab names the right ini, and that a
+  rebound key still copies tiers/ranges.
 
 - **`search-same-priced` hotkey.** EE2-only copy-item target, now in
   `extra_registerable_actions` (`src/host_config.rs`) with a drift test
@@ -20,12 +23,7 @@ PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
    (`FileWriter.ts`). `write-data` is ignored, so the library tab does
    nothing. `log-item` is listed as unsupported in the drift test. `re-parse-log`
    should also flush its client-log channel (`ponytail:` in `server.rs`).
-2. **Advanced-descriptions key.** PoE2 copies use Ctrl+Alt+C, assuming
-   PoE2's default Alt. EE2 reads the real key from
-   `poe2_production_Config.ini` (`GameConfig.ts`), so a rebound key breaks
-   advanced copies here. Marked `ponytail:` in `Game::copy_with_alt`
-   (`src/game.rs`).
-3. **Ignored EE2 settings.** `hideOverlayOnBlur` (with
+2. **Ignored EE2 settings.** `hideOverlayOnBlur` (with
    `OVERLAY->MAIN::render-state`) and `initialDelay`, the clipboard poll's
    first delay, are accepted but do nothing.
 
