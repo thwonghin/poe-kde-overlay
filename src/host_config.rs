@@ -267,19 +267,12 @@ pub fn default_actions() -> Vec<ShortcutAction> {
     ]
 }
 
-/// The rest of the copy-item targets the original renderer UI could
-/// configure — item-check/settings-item-check.vue's wiki/PoEDB/Craft of
-/// Exile/find-in-stash keys, and item-check's own advanced-description
-/// hotkey (item-check/settings-item-check.vue, hotkeys.vue) — registered
-/// with no default trigger (empty `shortcut`; `to_portal_trigger` maps
-/// that to an empty XKB trigger string, which `apply_shortcuts` turns into
-/// `preferred_trigger(None)`), same as real APT itself leaves them unset
-/// until a user picks a key. Registering them anyway (rather than only on
-/// demand, as `update-host-config` used to) is what makes them show up as
-/// nameable, bindable entries in KDE's own Global Shortcuts settings at
-/// all — since our renderer's Hotkeys/Item Info tabs no longer expose a way
-/// to set them, that's now the only place a user could ever discover or
-/// enable them.
+/// The rest of the copy-item targets the renderer UI can configure
+/// (settings-item-check.vue's wiki/PoEDB/Craft of Exile/find-in-stash keys,
+/// plus item-check), registered with no default trigger like upstream
+/// leaves them. Registering them up front is what makes them appear as
+/// bindable entries in KDE's Global Shortcuts settings — the only place
+/// left to set them, since our Hotkeys/Item Info tabs are replaced.
 pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
     let copy_item = |target: &str, focus_overlay: bool| ShortcutAction {
         shortcut: String::new(),

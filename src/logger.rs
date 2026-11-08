@@ -27,11 +27,18 @@ impl Logger {
         self.history.lock().unwrap().clone()
     }
 
+    /// Same line format as RemoteLogger.ts (`[time] message\n`): the
+    /// renderer appends each entry to its Log tab verbatim, so the newline
+    /// is what separates live entries.
     pub fn write(&self, message: &str) {
+        let time = gtk4::glib::DateTime::now_local()
+            .and_then(|now| now.format("%X"))
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let line = format!("[{time}] {message}\n");
         {
             let mut history = self.history.lock().unwrap();
-            history.push_str(message);
-            history.push('\n');
+            history.push_str(&line);
             if history.len() > HISTORY_LIMIT {
                 let excess = history.len() - HISTORY_LIMIT;
                 // Cut at a line boundary so the replay never starts mid-line.
@@ -40,7 +47,7 @@ impl Logger {
             }
         }
         self.events
-            .broadcast("MAIN->CLIENT::log-entry", json!({ "message": message }));
+            .broadcast("MAIN->CLIENT::log-entry", json!({ "message": line }));
     }
 
     /// stderr + the in-app Log tab.
@@ -63,6 +70,7 @@ mod tests {
         }
         let history = logger.history();
         assert!(history.len() <= HISTORY_LIMIT);
-        assert!(history.starts_with('x') && history.ends_with("x\n"));
+        assert!(history.starts_with('[') && history.ends_with("x\n"));
+        assert_eq!(history.lines().count(), history.matches('\n').count());
     }
 }

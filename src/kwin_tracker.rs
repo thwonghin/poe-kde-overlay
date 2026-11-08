@@ -55,16 +55,10 @@ impl WindowEvent {
         is_path_of_exile(&self.class_name, &self.caption)
     }
 
-    /// True when this activation event is our own overlay surface, not some
-    /// other real app. Confirmed live: KDE's KeyboardMode::OnDemand grants
-    /// our layer-shell surface a genuine window-activation event the moment
-    /// it becomes interactive (click-through off, e.g. opening a locked
-    /// price-check popup) -- not only on an explicit click. Callers that
-    /// track "what's the last externally-focused app" (main.rs's
-    /// `active_window`, used by shortcuts.rs::price_check to avoid injecting
-    /// Ctrl+C into whatever app happens to be focused) must ignore these
-    /// self-activations, or a locked popup opening would immediately look
-    /// indistinguishable from "the user alt-tabbed away from the game."
+    /// Our own overlay surface: KWin activates it whenever it becomes
+    /// keyboard-interactive (KeyboardMode::OnDemand), not only on a click.
+    /// Anything tracking the last externally focused app must skip these,
+    /// or opening a locked popup looks like alt-tabbing away from PoE.
     pub fn is_own_process(&self) -> bool {
         self.pid as u32 == std::process::id()
     }

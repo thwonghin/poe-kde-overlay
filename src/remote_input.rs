@@ -16,14 +16,10 @@ use reis::{ei, event};
 use crate::host_config::key_to_evdev;
 use crate::logger::Logger;
 
-// Raw Linux evdev keycodes (linux/input-event-codes.h). notify_keyboard_keycode
-// (the plain RemoteDesktop D-Bus path) turned out to have zero real-world
-// effect on this KDE version despite the session being genuinely granted —
-// confirmed via xdg-desktop-portal-kde debug logs showing the calls arriving
-// correctly. NotifyKeyboardKeycode goes through KDE's own `fake_input`
-// Wayland protocol; ConnectToEIS instead hands us a raw libei connection that
-// KWin's actual remote-input backend is built around, which is the path KDE
-// Connect itself uses. Keycodes stay evdev numbering either way.
+// Evdev keycodes (linux/input-event-codes.h), injected over libei
+// (ConnectToEIS). The portal's plain NotifyKeyboardKeycode has no effect on
+// this KDE version even with the session granted; EIS is the path KWin's
+// remote-input backend (and KDE Connect) actually uses.
 const KEY_LEFTCTRL: u32 = 29;
 const KEY_C: u32 = 46;
 
@@ -82,16 +78,12 @@ fn is_mod_key(key: &str) -> bool {
     matches!(key, "Ctrl" | "Shift" | "Alt")
 }
 
-// Ported from HostClipboard.ts's POLL_DELAY/POLL_LIMIT: after pressing
-// Ctrl+C, poll the clipboard every 48ms rather than assuming any single
-// fixed wait is always long enough for the game to update it, and give up
-// after roughly 500ms of polling with no item text ever showing up.
+// HostClipboard.ts's POLL_DELAY/POLL_LIMIT: after Ctrl+C, poll every 48ms
+// for the game's copy to land; give up after ~500ms.
 const CLIPBOARD_POLL_DELAY_MS: u64 = 48;
 const CLIPBOARD_POLL_LIMIT_MS: u64 = 500;
 
-// See read_clipboard_once_bounded's doc comment: bounds a single portal
-// SelectionRead call, which has been observed to hang forever (a real
-// xdg-desktop-portal-kde bug, not a timing issue on our side).
+// Bounds one portal SelectionRead (see read_clipboard_once_bounded).
 const CLIPBOARD_READ_TIMEOUT_MS: u64 = 200;
 
 const CLIPBOARD_TEXT_MIME: &str = "text/plain;charset=utf-8";
@@ -130,43 +122,26 @@ pub struct RemoteInput {
     context: ei::Context,
     connection: event::Connection,
     keyboard: Rc<RefCell<Option<KeyboardHandle>>>,
-    // Reference point for frame() timestamps (microseconds, monotonic) — real
-    // values, not a hardcoded 0, since the EIS server likely uses them for
-    // event ordering and may misorder/drop identically-timestamped events.
+    // Reference point for frame() timestamps (monotonic µs). Real values,
+    // not 0: EIS may order or drop identically-timestamped events.
     start: std::time::Instant,
-    // Portal-based clipboard access (org.freedesktop.portal.Clipboard), tied
-    // to this RemoteDesktop session. Reading via GTK4's own gdk::Clipboard
-    // turned out to only work reliably while our own window had keyboard
-    // focus — Wayland gates clipboard visibility by focus for privacy, and
-    // our overlay is meant to never hold focus while the game does. This
-    // portal exists specifically so a RemoteDesktop-style session can read
-    // the clipboard regardless of local focus.
+    // Portal clipboard tied to this RemoteDesktop session: readable
+    // regardless of local focus, unlike gdk::Clipboard (Wayland gates that
+    // by keyboard focus, which the overlay never holds while PoE does).
     clipboard: Clipboard,
     // Kept alive, not otherwise used post-setup: dropping the D-Bus portal
     // session could tear down the EIS grant it authorized, even though the
     // raw EIS socket (`context`) is a separate connection.
     #[allow(dead_code)]
     session: Session<RemoteDesktop>,
-    // Content we've most recently claimed clipboard ownership of via
-    // SetSelection (see write_clipboard_text) and must hand back whenever
-    // the compositor asks for it via a SelectionTransfer request (handled
-    // by the listener task spawned in `setup`). `None` until restoreClipboard
-    // is used for the first time.
+    // What we last claimed clipboard ownership of (write_clipboard_text);
+    // served to SelectionTransfer requests by the listener in `setup`.
     pending_clipboard_write: Rc<RefCell<Option<String>>>,
-    // Tracks whether the *current* clipboard selection owner offers
-    // CLIPBOARD_TEXT_MIME, kept in sync by a listener task (spawned in
-    // `setup`) on the portal's own SelectionOwnerChanged signal. Confirmed
-    // live: our own WebKitGTK webview intermittently claims clipboard
-    // ownership itself (offering only its internal
-    // "org.webkitgtk.WebKit.custom-pasteboard-data" format, e.g. while a
-    // price-check popup is interactive) — attempting a SelectionRead for a
-    // mime type the current owner doesn't offer is what triggers the
-    // xdg-desktop-portal-kde bug read_clipboard_once_bounded's doc comment
-    // describes. Checking this first lets copy_item_text skip the read
-    // entirely while we already know it would hit that bug, rather than
-    // relying solely on the per-read timeout as a safety net. Starts `true`
-    // (optimistic) since there's no way to query current state up front,
-    // only be notified of changes.
+    // Whether the current clipboard owner offers CLIPBOARD_TEXT_MIME, from
+    // SelectionOwnerChanged. Reading a type the owner doesn't offer hits the
+    // portal hang (read_clipboard_once_bounded), and our own WebView
+    // sometimes owns the clipboard with only a WebKit-internal type. Starts
+    // `true`: current state can't be queried, only changes observed.
     clipboard_offers_text: Rc<Cell<bool>>,
     // Latest depressed-modifier mask from the EIS KeyboardModifiers events,
     // which reflect the seat (the user's real keyboard), not just our own
@@ -247,7 +222,11 @@ impl RemoteInput {
                             continue;
                         }
                     };
-                    println!("[remote_input] eis event: {event:?}");
+                    // Not modifier changes: those fire on every Ctrl/Alt/Shift
+                    // press anywhere on the desktop.
+                    if !matches!(event, EiEvent::KeyboardModifiers(_)) {
+                        println!("[remote_input] eis event: {event:?}");
+                    }
                     match event {
                         EiEvent::SeatAdded(added) => {
                             added
@@ -281,30 +260,16 @@ impl RemoteInput {
             });
         }
 
-        // Answers clipboard-read requests from the rest of the desktop while
-        // we hold selection ownership (see write_clipboard_text) — the
-        // portal doesn't let us just "set the clipboard"; instead we claim
-        // ownership via SetSelection and then must serve SelectionTransfer
-        // requests reactively for as long as we own it, mirroring the EIS
-        // event loop above in shape (a persistent listener task), though it's
-        // a separate D-Bus signal stream, not an EIS one. Uses its own
-        // Clipboard handle (Session isn't Clone, but `self.clipboard` is
-        // moved into `Self` below anyway, and each stream item already
-        // carries its own reconstructed Session, so no session needs to be
-        // shared with it).
+        // The portal can't just "set the clipboard": we claim ownership via
+        // SetSelection (write_clipboard_text) and then serve each
+        // SelectionTransfer request while we own it. Own Clipboard handle;
+        // each stream item carries its own Session.
         let pending_clipboard_write: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         {
             let pending_clipboard_write = pending_clipboard_write.clone();
             let logger = logger.clone();
             let transfer_clipboard = Clipboard::new().await?;
             gtk4::glib::spawn_future_local(async move {
-                // Built inside the moved-in async block (rather than passed
-                // in already-borrowing transfer_clipboard) so the stream's
-                // borrow of transfer_clipboard and transfer_clipboard's own
-                // later use below (selection_write/selection_write_done)
-                // stay within the same scope -- both are shared (&self)
-                // borrows, so they can coexist once they're not fighting
-                // over which scope owns transfer_clipboard.
                 let transfers = match transfer_clipboard
                     .receive_selection_transfer::<RemoteDesktop>()
                     .await
@@ -341,12 +306,7 @@ impl RemoteInput {
             });
         }
 
-        // See `clipboard_offers_text`'s doc comment: tracks whether the
-        // current clipboard owner offers CLIPBOARD_TEXT_MIME, so
-        // copy_item_text can skip a doomed SelectionRead instead of
-        // hitting the portal's hang-on-not-offered-format bug. Own
-        // Clipboard handle for the same reason as the transfer listener
-        // above (independent long-lived signal subscription).
+        // Keeps `clipboard_offers_text` in sync.
         let clipboard_offers_text: Rc<Cell<bool>> = Rc::new(Cell::new(true));
         {
             let clipboard_offers_text = clipboard_offers_text.clone();
@@ -407,18 +367,10 @@ impl RemoteInput {
         Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
-    /// Bounds a single clipboard read so a portal-side failure can't hang
-    /// forever. Confirmed live against `xdg-desktop-portal-kde`: when we ask
-    /// for a mime type the current selection owner doesn't currently offer,
-    /// its journal logs `"requesting not offered format"` immediately
-    /// followed by `QDBusConnection: error: could not send reply message to
-    /// service "": Marshalling failed: Invalid file descriptor passed in
-    /// arguments` -- its own error-reply path is broken and never sends any
-    /// D-Bus reply back (success or failure), so an unbounded await on
-    /// `read_clipboard_once` hangs forever. Since `copy_item_text` is
-    /// awaited inline in shortcuts.rs's hotkey-dispatch loop, a single hang
-    /// here would silently wedge every future hotkey press until the
-    /// process is restarted, not just fail one price-check.
+    /// xdg-desktop-portal-kde never replies to a SelectionRead for a type
+    /// the current owner doesn't offer (journal: "requesting not offered
+    /// format", then "Marshalling failed: Invalid file descriptor"), so an
+    /// unbounded read hangs forever — and with it the hotkey loop.
     async fn read_clipboard_once_bounded(&self) -> ashpd::Result<Option<String>> {
         let timeout = std::time::Duration::from_millis(CLIPBOARD_READ_TIMEOUT_MS);
         crate::with_timeout(timeout, self.read_clipboard_once())
@@ -431,12 +383,8 @@ impl RemoteInput {
             })
     }
 
-    /// Skips the read entirely when `clipboard_offers_text` already says the
-    /// current owner doesn't have our mime type -- see that field's doc
-    /// comment. This is the main defense against the portal's
-    /// not-offered-format hang bug; `read_clipboard_once_bounded`'s timeout
-    /// is the backstop for the narrow race where ownership changes between
-    /// this check and the actual read.
+    /// Main defense against that hang; the timeout is the backstop for an
+    /// ownership change racing this check.
     async fn read_clipboard_if_offered(&self) -> ashpd::Result<Option<String>> {
         if !self.clipboard_offers_text.get() {
             return Ok(None);
@@ -444,42 +392,26 @@ impl RemoteInput {
         self.read_clipboard_once_bounded().await
     }
 
-    /// Polls the clipboard for item text (see CLIPBOARD_POLL_DELAY_MS/
-    /// CLIPBOARD_POLL_LIMIT_MS) instead of assuming a single read some fixed
-    /// delay after Ctrl+C is always fast enough. When `restore` is true,
-    /// also writes back whatever was on the clipboard beforehand once
-    /// polling finishes (success or timeout) -- unless that pre-existing
-    /// value already looked like item text itself, in which case there's no
-    /// way to tell whether it's stale leftover text or the fresh copy racing
-    /// ahead of us, so nothing is restored (matches HostClipboard.ts's own
-    /// defensive handling of the same race).
+    /// Port of HostClipboard.ts's readItemText(): press Ctrl+C, clear the
+    /// clipboard, then poll until item text shows up. The clear is
+    /// unconditional — otherwise item text left from a previous check is
+    /// accepted on the first tick, showing the wrong item. With `restore`,
+    /// the previous content is written back afterwards, unless it looked
+    /// like item text itself (stale or fresh can't be told apart).
     ///
-    /// Ported from HostClipboard.ts's readItemText(): clipboard content is
-    /// cleared *before* polling starts, unconditionally (not gated on
-    /// `restore` -- only the write-back afterward is). Without this,
-    /// content left over from a previous price-check (or anything else)
-    /// that already happens to look like valid item text gets accepted
-    /// immediately on the poll loop's very first tick if the game hasn't
-    /// updated the clipboard yet by then, silently showing stale data for
-    /// whatever's actually under the cursor now -- confirmed live, this is
-    /// exactly what was happening. Not porting the KDE "prevent empty
-    /// clipboard" workaround's throwaway-marker detail (writing
-    /// `__APT_FORCE_EMPTY_<timestamp>` instead of a plain empty string) --
-    /// that's specifically about Electron's clipboard API being vetoed by
-    /// Klipper; revisit only if writing an empty string here turns out not
-    /// to actually clear it in testing.
+    /// ponytail: upstream's `__APT_FORCE_EMPTY_<timestamp>` marker (Klipper
+    /// vetoing Electron's empty writes) isn't ported; a plain "" clears fine
+    /// through the portal so far.
     pub async fn copy_item_text(
         &self,
         restore: bool,
         hotkey: &str,
         keep_mod_keys: bool,
     ) -> ashpd::Result<Option<String>> {
-        // Press *before* the snapshot/clear, unlike real HostClipboard.ts.
-        // Tried the upstream order (snapshot first) live: the pre-read then
-        // hits whatever owned the clipboard before (often not offering text)
-        // and trips the portal's not-offered-format hang (see
-        // read_clipboard_once_bounded), wedging later calls. Pressing first
-        // means PoE already owns the selection by the time we read.
+        // Press *before* the snapshot/clear, unlike HostClipboard.ts: a
+        // snapshot first reads whatever owned the clipboard before (often
+        // not offering text) and trips the portal hang. Pressing first means
+        // PoE owns the selection by the time we read.
         self.release_shortcut_keys(hotkey, keep_mod_keys);
         self.press_copy(keep_mod_keys);
 
@@ -497,11 +429,8 @@ impl RemoteInput {
             // of the stale-content race this clear exists to prevent.
         }
 
-        // Real wall-clock time, not a count of ticks -- a single tick can
-        // itself cost up to CLIPBOARD_READ_TIMEOUT_MS when the portal hangs,
-        // so assuming every tick costs exactly CLIPBOARD_POLL_DELAY_MS would
-        // let this loop run several times longer than intended before
-        // giving up.
+        // Wall-clock, not a tick count: a tick can cost up to
+        // CLIPBOARD_READ_TIMEOUT_MS when a read hangs.
         let start = std::time::Instant::now();
         let result = loop {
             gtk4::glib::timeout_future(std::time::Duration::from_millis(CLIPBOARD_POLL_DELAY_MS))
@@ -518,19 +447,12 @@ impl RemoteInput {
                 break text;
             }
             if start.elapsed().as_millis() as u64 >= CLIPBOARD_POLL_LIMIT_MS {
-                let msg = "[remote_input] clipboard poll timed out, no item text found";
-                println!("{msg}");
-                self.logger.write(msg);
+                self.logger.error("[remote_input] clipboard poll timed out, no item text found");
                 break None;
             }
         };
 
         if restore {
-            // Don't restore `previous` if it already looked like item text
-            // itself -- there's no way to tell whether that was genuinely
-            // stale leftover text or the fresh copy racing ahead of us, so
-            // restoring it would risk leaving stale item text sitting in
-            // the clipboard instead of the empty string this cleared it to.
             let restore_value = match previous.as_deref() {
                 Some(text) if !looks_like_item_text(text) => text,
                 _ => "",
@@ -543,13 +465,9 @@ impl RemoteInput {
         Ok(result)
     }
 
-    // NOTE (verify live, same category as this file's other portal-behavior
-    // assumptions confirmed against a real KDE session): unclear whether
-    // SetSelection makes us the clipboard owner only until some other app's
-    // own copy naturally reclaims it (matching normal desktop clipboard
-    // behavior), or whether it "sticks" until we call SetSelection again. If
-    // restoring the clipboard ever shadows the user's later copies, this is
-    // the mechanism to revisit.
+    // If restoring the clipboard ever shadows the user's later copies, check
+    // whether SetSelection ownership "sticks" instead of being reclaimed by
+    // the next app that copies.
     async fn write_clipboard_text(&self, text: &str) -> ashpd::Result<()> {
         self.pending_clipboard_write.replace(Some(text.to_string()));
         self.clipboard
