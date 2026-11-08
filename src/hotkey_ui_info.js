@@ -79,9 +79,10 @@
       marker.dataset.aptBannerAdded = '1';
     }
 
-    // Item info tab: its entire content is hotkey rows (no unrelated
-    // settings mixed in), so every existing child of the tab root gets
-    // hidden and the banner becomes the tab's only visible content.
+    // Item info tab: hotkey rows, so every existing child of the tab root
+    // gets hidden behind the banner. Except a row that also holds a real
+    // setting, a <select> (poe2's search-same-priced "Filter by"): that row
+    // stays, minus its hotkey field (HotkeyInput.vue renders an <input>).
     var labels = document.querySelectorAll('label');
     for (var j = 0; j < labels.length; j++) {
       if (!startsWithMarker('itemCheckFirst', labels[j].textContent.trim())) continue;
@@ -91,7 +92,15 @@
       tabRoot2.dataset.aptBannerAdded = '1';
       var existingRows = Array.prototype.slice.call(tabRoot2.children);
       tabRoot2.insertBefore(makeBanner(), tabRoot2.firstChild);
-      for (var r = 0; r < existingRows.length; r++) existingRows[r].style.display = 'none';
+      for (var r = 0; r < existingRows.length; r++) {
+        var row = existingRows[r];
+        if (!row.querySelector('select')) {
+          row.style.display = 'none';
+          continue;
+        }
+        var inputs = row.querySelectorAll('input');
+        for (var n = 0; n < inputs.length; n++) inputs[n].style.display = 'none';
+      }
     }
 
     var searchDivs = document.querySelectorAll('div');

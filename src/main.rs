@@ -70,9 +70,10 @@ pub(crate) const APP_ID: &str = "io.github.thwonghin.PoeKdeOverlay";
 //     radio is a later, unrelated real setting and stays untouched.
 //   - "Item info" tab (item-check/settings-item-check.vue) — no equivalent
 //     static hint box, so detected via its first hotkey row's own label
-//     ("Open item on wiki", `item.open_on_wiki`). This tab's entire content
-//     is hotkey rows, so
-//     everything in it gets hidden, leaving just the banner.
+//     ("Open item on wiki", `item.open_on_wiki`). This tab is hotkey rows,
+//     so they're hidden behind the banner, except a row that also holds a
+//     <select> (poe2's search-same-priced "Filter by"), which keeps all but
+//     its hotkey field.
 // Not annotated: stash-search/stopwatch/chat-command hotkey fields — a key
 // set there becomes that action's preferred KDE trigger the first time it's
 // registered (apply_shortcuts in shortcuts.rs); after that KDE owns it like
