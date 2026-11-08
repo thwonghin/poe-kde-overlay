@@ -27,8 +27,14 @@ pub(crate) fn dist_dir() -> &'static Path {
 
 type ClientId = u64;
 
+// The socket itself is owned by its connection thread (handle_websocket),
+// never shared: senders just queue text here and that thread writes it out
+// between reads. Sharing the socket behind a Mutex let the reader (which
+// re-locks immediately after each 15ms read timeout) starve senders —
+// confirmed live, the GTK main thread blocked 4.4s in send_last_active,
+// freezing every hotkey and delaying the price-check popup.
 struct Client {
-    ws: Mutex<tungstenite::WebSocket<TcpStream>>,
+    tx: std::sync::mpsc::Sender<String>,
 }
 
 pub struct EventBus {
@@ -59,7 +65,7 @@ pub struct EventBus {
     shortcut_config_tx: async_channel::Sender<Vec<ShortcutAction>>,
     // Carries the same update-host-config event's restoreClipboard flag,
     // over to shortcuts.rs so price-check can pass it into
-    // RemoteInput::read_clipboard_text. Same shape as the two channels
+    // RemoteInput::copy_item_text. Same shape as the two channels
     // above, kept separate since it's consumed independently (doesn't touch
     // apply_shortcuts's GlobalShortcuts bookkeeping).
     restore_clipboard_tx: async_channel::Sender<bool>,
@@ -104,12 +110,12 @@ impl EventBus {
         )
     }
 
-    fn add_client(&self, ws: tungstenite::WebSocket<TcpStream>) -> ClientId {
+    fn add_client(&self, tx: std::sync::mpsc::Sender<String>) -> ClientId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.clients
             .lock()
             .unwrap()
-            .insert(id, Arc::new(Client { ws: Mutex::new(ws) }));
+            .insert(id, Arc::new(Client { tx }));
         *self.last_active.lock().unwrap() = Some(id);
         id
     }
@@ -152,11 +158,8 @@ impl EventBus {
     }
 
     fn send_to(&self, client: &Arc<Client>, msg: &str) {
-        let mut ws = client.ws.lock().unwrap();
-        // WouldBlock is expected (read-timeout keeps the connection thread's
-        // blocking read from starving concurrent senders forever); anything
-        // else means the connection's dead, drop it silently.
-        let _ = ws.send(tungstenite::Message::Text(msg.into()));
+        // Never blocks; a send error just means the connection thread is gone.
+        let _ = client.tx.send(msg.to_string());
     }
 
     pub fn broadcast(&self, name: &str, payload: Value) {
@@ -271,15 +274,10 @@ fn handle_websocket(
     config: &Arc<ConfigStore>,
     logger: &Arc<Logger>,
 ) -> std::io::Result<()> {
-    // Kept short deliberately: this connection's read() call holds the same
-    // mutex that broadcast()/send_last_active() need to send anything to
-    // this client (e.g. closing the price-check popup in response to its
-    // own "x" button). A long timeout here meant every outgoing message had
-    // to wait for the current blocking read to time out first, making
-    // closes feel sluggish — 200ms was the original value and was
-    // noticeably laggy in testing.
+    // Bounds how long a queued outgoing message waits for the current
+    // blocking read to time out before this thread gets to write it.
     stream.set_read_timeout(Some(Duration::from_millis(15)))?;
-    let ws = match tungstenite::accept(stream) {
+    let mut ws = match tungstenite::accept(stream) {
         Ok(ws) => ws,
         Err(err) => {
             eprintln!("[server] websocket handshake failed: {err}");
@@ -287,36 +285,29 @@ fn handle_websocket(
         }
     };
 
-    let id = events.add_client(ws);
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let id = events.add_client(tx);
     println!("[server] websocket client {id} connected");
     events.send_last_active(
         "MAIN->CLIENT::log-entry",
         json!({ "message": logger.history() }),
     );
 
-    loop {
-        let client = match events.clients.lock().unwrap().get(&id).cloned() {
-            Some(client) => client,
-            None => break,
-        };
-
-        let msg = {
-            let mut ws = client.ws.lock().unwrap();
-            ws.read()
-        };
-
-        match msg {
+    'conn: loop {
+        match ws.read() {
             Ok(tungstenite::Message::Text(text)) => {
                 handle_client_event(&text, id, events, config, logger);
             }
             Ok(tungstenite::Message::Close(_)) => break,
             Ok(_) => {}
             Err(tungstenite::Error::Io(ref io_err))
-                if io_err.kind() == std::io::ErrorKind::WouldBlock =>
-            {
-                continue;
-            }
+                if io_err.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => break,
+        }
+        while let Ok(msg) = rx.try_recv() {
+            if ws.send(tungstenite::Message::Text(msg.into())).is_err() {
+                break 'conn;
+            }
         }
     }
 
