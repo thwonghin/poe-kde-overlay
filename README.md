@@ -90,7 +90,7 @@ and type-checks them with `tsc` against `ipc/types.ts`. Then
 `tests/upstream_contract.rs` checks that the renderer still has the text and
 markup the injected Settings script looks for.
 
-### Installing on Arch or CachyOS with the PKGBUILD
+### Installing on Arch with the PKGBUILD
 
 ```sh
 git clone https://github.com/thwonghin/apt-kwin-overlay.git
