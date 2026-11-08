@@ -55,10 +55,10 @@ Vue app), never its `main/` (the Electron process this project replaces).
 
 ## Status
 
-This is a working spike, not a polished release — see [WIP.md](WIP.md) for
-a detailed audit of what real APT does that we don't (yet) replicate: stash
-scroll-navigation, hover-to-interact / hold-to-pin the popup, Alt-hold-to-peek,
-and game-log-driven notifications.
+This is a working spike, not a polished release. Known differences from real
+APT: no Ctrl+scroll stash-tab navigation, no `logKeys` key logging, no
+game-log watcher (the pinned renderer discards its lines anyway), and no
+Windows-only OCR or self-updater.
 
 ## Requirements
 

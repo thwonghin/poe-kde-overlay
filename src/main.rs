@@ -46,10 +46,10 @@ pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
 //     static hint box, so detected via its first hotkey row's own label
 //     ("Open item on wiki"). This tab's entire content is hotkey rows, so
 //     everything in it gets hidden, leaving just the banner.
-// Not annotated: stash-search/stopwatch/chat-command/ocr-gems hotkey
-// fields — those map to action types we don't bind at all (Unsupported),
-// so editing them has always been inert; that's a pre-existing
-// WIP.md-documented gap, not something today's stable-id change made worse.
+// Not annotated: stash-search/stopwatch/chat-command hotkey fields — a key
+// set there becomes that action's preferred KDE trigger the first time it's
+// registered (apply_shortcuts in shortcuts.rs); after that KDE owns it like
+// every other hotkey. ocr-gems is Windows-only upstream and stays inert.
 //
 // Price Check's own tab keeps a real, functional pair of toggles ("smart
 // initial search" / "locked initial search" — price-check/

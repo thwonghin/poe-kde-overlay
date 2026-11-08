@@ -7,9 +7,6 @@ the `vendor/awakened-poe-trade` submodule; `src/*.rs` reimplements
 
 ## Start here
 
-- **`WIP.md`** is the live tracker for open parity gaps vs. upstream and
-  productionalization status. Read it before picking up work; when an item
-  closes, move it into its intro's closed list in the same change.
 - Non-obvious decisions live as code comments at the call sites (e.g. why
   hotkeys are owned by KDE Global Shortcuts, why price-check presses Ctrl+C
   before the clipboard snapshot, why WebSocket sockets are thread-owned).

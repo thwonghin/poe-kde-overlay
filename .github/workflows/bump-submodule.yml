@@ -79,8 +79,8 @@ jobs:
           # renderer (ipc/**) without a compiler enforcing the two stay in
           # sync -- a green build here only proves both sides compile, not
           # that message shapes/config schemas/allowlists still match.
-          # Excludes the two subtrees WIP.md documents as permanently out
-          # of scope regardless of upstream changes (AppUpdater.ts:
+          # Excludes the two subtrees that are permanently out of scope
+          # regardless of upstream changes (AppUpdater.ts:
           # stubbed, doesn't apply to a locally-built binary; vision/**:
           # Windows-only OCR).
           changed=$(git -C vendor/awakened-poe-trade diff --name-only \
