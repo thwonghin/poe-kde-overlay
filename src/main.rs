@@ -16,6 +16,7 @@ pub(crate) fn debug_enabled() -> bool {
 
 mod config_store;
 mod host_config;
+mod ipc;
 mod kwin_tracker;
 mod logger;
 mod overlay_visibility;
@@ -35,6 +36,7 @@ use gtk4::cairo::Region;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use ipc::MainEvent;
 use kwin_tracker::TrackerEvent;
 use webkit6::WebView;
 use webkit6::prelude::*;
@@ -167,19 +169,15 @@ impl Overlay {
         // price-check window) in reaction to this event
         // (renderer/src/web/overlay/OverlayWindow.vue). click-through ON
         // maps to "overlay not active", OFF to "overlay active".
-        self.events.broadcast(
-            "MAIN->OVERLAY::focus-change",
-            serde_json::json!({
-                "game": now_click_through,
-                "overlay": !now_click_through,
-                "usingHotkey": true,
-            }),
-        );
+        self.events.broadcast(&MainEvent::FocusChange {
+            game: now_click_through,
+            overlay: !now_click_through,
+            using_hotkey: true,
+        });
     }
 
     pub fn hide_price_check(&self) {
-        self.events
-            .broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        self.events.broadcast(&MainEvent::HideExclusiveWidget);
         self.price_check_open.set(false);
     }
 
@@ -455,9 +453,7 @@ fn build_ui(app: &Application) {
                             // new pid means the game was restarted.
                             if attached_pid != Some(w.pid) {
                                 attached_pid = Some(w.pid);
-                                overlay
-                                    .events
-                                    .broadcast("MAIN->OVERLAY::overlay-attached", serde_json::Value::Null);
+                                overlay.events.broadcast(&MainEvent::OverlayAttached);
                             }
                             // Mirrors real APT's handlePoeWindowActiveChange:
                             // PoE *regaining* focus forces any interactive

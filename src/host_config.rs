@@ -13,8 +13,8 @@ use serde::Deserialize;
 
 use crate::logger::Logger;
 
-#[derive(Debug, Clone, Default, Deserialize)]
-struct HostConfig {
+#[derive(Debug, Clone, Default, Deserialize, ts_rs::TS)]
+pub struct HostConfig {
     #[serde(default)]
     shortcuts: Vec<ShortcutAction>,
     #[serde(default, rename = "restoreClipboard")]
@@ -23,7 +23,7 @@ struct HostConfig {
     window_title: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 pub struct ShortcutAction {
     pub shortcut: String,
     pub action: ActionKind,
@@ -31,10 +31,11 @@ pub struct ShortcutAction {
     /// held modifiers alone (the renderer sets this for the hold-to-pin
     /// price-check hotkey and toggle-overlay).
     #[serde(default, rename = "keepModKeys")]
+    #[ts(as = "Option<bool>", optional)] // `keepModKeys?: true` upstream
     pub keep_mod_keys: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ActionKind {
     ToggleOverlay,
@@ -42,6 +43,7 @@ pub enum ActionKind {
     CopyItem {
         target: String,
         #[serde(default)]
+        #[ts(as = "Option<bool>", optional)]
         focus_overlay: bool,
     },
     // Real Shortcuts.ts just broadcasts MAIN->CLIENT::widget-action for
@@ -55,8 +57,13 @@ pub enum ActionKind {
         send: bool,
     },
     StashSearch { text: String },
-    // ocr-text (Windows-only upstream) / test-only — parsed but inert.
+    // Parsed but inert: OCR is Windows-only upstream.
+    OcrText,
+    TestOnly,
+    /// Runtime leniency only; hidden from the type check (ipc.rs) so a new
+    /// upstream action type still fails it.
     #[serde(other)]
+    #[ts(skip)]
     Unsupported,
 }
 
@@ -275,11 +282,7 @@ pub struct ParsedHostConfig {
     pub window_title: String,
 }
 
-pub fn parse_host_config(payload: &serde_json::Value, logger: &Arc<Logger>) -> ParsedHostConfig {
-    let parsed = serde_json::from_value::<HostConfig>(payload.clone()).unwrap_or_else(|err| {
-        logger.error(&format!("[host_config] bad update-host-config payload: {err}"));
-        HostConfig::default()
-    });
+pub fn parse_host_config(parsed: HostConfig, logger: &Arc<Logger>) -> ParsedHostConfig {
     ParsedHostConfig {
         shortcuts: filter_valid(parsed.shortcuts, logger),
         restore_clipboard: parsed.restore_clipboard,
@@ -354,7 +357,7 @@ fn fnv1a(text: &str) -> u64 {
 /// trigger, rebinding in KDE and then having the renderer resend its
 /// (still-original) config would mint a second, competing binding for the
 /// same action. Keying on action type + target + focus_overlay avoids that.
-/// `None` for `Unsupported` — those are never registered.
+/// `None` for inert actions — those are never registered.
 pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
     let slug = |s: &str| {
         s.chars()
@@ -379,7 +382,7 @@ pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
             Some(format!("paste-in-chat-{send}-{:016x}", fnv1a(text)))
         }
         ActionKind::StashSearch { text } => Some(format!("stash-search-{:016x}", fnv1a(text))),
-        ActionKind::Unsupported => None,
+        ActionKind::OcrText | ActionKind::TestOnly | ActionKind::Unsupported => None,
     }
 }
 
@@ -488,7 +491,7 @@ mod tests {
             "language": "en",
         });
 
-        let parsed = parse_host_config(&payload, &test_logger());
+        let parsed = parse_host_config(serde_json::from_value(payload).unwrap(), &test_logger());
         assert_eq!(parsed.shortcuts.len(), 6);
         assert!(matches!(
             parsed.shortcuts[0].action,
@@ -507,7 +510,7 @@ mod tests {
             parsed.shortcuts[4].action,
             ActionKind::PasteInChat { ref text, send: true } if text == "/hideout"
         ));
-        assert!(matches!(parsed.shortcuts[5].action, ActionKind::Unsupported));
+        assert!(matches!(parsed.shortcuts[5].action, ActionKind::OcrText));
         assert!(parsed.restore_clipboard);
         assert_eq!(parsed.window_title, "Path of Exile");
     }
@@ -515,7 +518,7 @@ mod tests {
     #[test]
     fn restore_clipboard_defaults_to_false_when_omitted() {
         let payload = serde_json::json!({ "shortcuts": [] });
-        assert!(!parse_host_config(&payload, &test_logger()).restore_clipboard);
+        assert!(!parse_host_config(serde_json::from_value(payload).unwrap(), &test_logger()).restore_clipboard);
     }
 
     #[test]

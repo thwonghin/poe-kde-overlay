@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use serde_json::json;
-
+use crate::ipc::MainEvent;
 use crate::server::EventBus;
 
 /// Replayed to each new WS client; older lines are dropped past this.
@@ -46,8 +45,7 @@ impl Logger {
                 history.drain(..cut);
             }
         }
-        self.events
-            .broadcast("MAIN->CLIENT::log-entry", json!({ "message": line }));
+        self.events.broadcast(&MainEvent::LogEntry { message: line });
     }
 
     /// stderr + the in-app Log tab.

@@ -10,12 +10,12 @@ use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, Ne
 use futures_util::StreamExt;
 use gtk4::glib;
 use gtk4_layer_shell::LayerShell;
-use serde_json::json;
 
 use crate::host_config::{
     ActionKind, ShortcutAction, default_actions, extra_registerable_actions,
     shortcut_id,
 };
+use crate::ipc::{MainEvent, Point};
 use crate::remote_input::{MOD_ALT, MOD_CTRL, RemoteInput};
 use crate::{Overlay, with_timeout};
 
@@ -79,7 +79,7 @@ fn shortcut_description(action: &ActionKind) -> String {
         ActionKind::TriggerEvent { target } => format!("Widget action ({target})"),
         ActionKind::PasteInChat { text, .. } => format!("Paste in chat ({text})"),
         ActionKind::StashSearch { text } => format!("Stash search ({text})"),
-        ActionKind::Unsupported => "Unsupported".to_string(),
+        ActionKind::OcrText | ActionKind::TestOnly | ActionKind::Unsupported => "Unsupported".to_string(),
     }
 }
 
@@ -246,7 +246,7 @@ async fn run(
             } => price_check(overlay, target, focus_overlay, &hotkey, action.keep_mod_keys).await,
             ActionKind::TriggerEvent { target } => overlay
                 .events
-                .broadcast("MAIN->CLIENT::widget-action", json!({ "target": target })),
+                .broadcast(&MainEvent::WidgetAction { target }),
             ActionKind::PasteInChat { .. } | ActionKind::StashSearch { .. } => {
                 // Real APT has every hotkey unregistered while the overlay
                 // is interactive; typing into PoE then would be surprising.
@@ -254,7 +254,7 @@ async fn run(
                     paste_action(overlay, &action.action, &hotkey).await
                 }
             }
-            ActionKind::Unsupported => {}
+            ActionKind::OcrText | ActionKind::TestOnly | ActionKind::Unsupported => {}
         }
     }
 
@@ -410,15 +410,12 @@ async fn price_check(
     // (PriceCheckWindow.vue): plain Ctrl+D auto-closes on mouse-move-away
     // (spawn_auto_close), Ctrl+Alt+D ("hotkeyLocked") opens interactive.
     overlay.events.clear_track_area();
-    overlay.events.send_last_active(
-        "MAIN->CLIENT::item-text",
-        json!({
-            "target": target,
-            "clipboard": clipboard,
-            "position": { "x": x, "y": y },
-            "focusOverlay": focus_overlay,
-        }),
-    );
+    overlay.events.send_last_active(&MainEvent::ItemText {
+        target: target.to_string(),
+        clipboard,
+        position: Point { x, y },
+        focus_overlay,
+    });
     overlay.price_check_open.set(true);
     // Every copy-item stops the previous popup tracker (Shortcuts.ts's
     // areaTracker.removeListeners() before item-text). Otherwise an

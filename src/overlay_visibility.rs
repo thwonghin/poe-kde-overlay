@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::glib;
-use serde_json::json;
+use crate::ipc::MainEvent;
 
 use crate::Overlay;
 use crate::remote_input::{MOD_ALT as ALT, MOD_CTRL as CTRL, MOD_SHIFT as SHIFT};
@@ -68,9 +68,7 @@ impl OverlayVisibility {
 
     fn set_visible(&self, visible: bool) {
         self.visible.set(visible);
-        self.overlay
-            .events
-            .broadcast("MAIN->OVERLAY::visibility", json!({ "isVisible": visible }));
+        self.overlay.events.broadcast(&MainEvent::Visibility { is_visible: visible });
     }
 }
 

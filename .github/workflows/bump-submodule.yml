@@ -132,10 +132,21 @@ jobs:
       - name: Build backend
         run: cargo build --release --locked
 
+      # PRs opened with the default GITHUB_TOKEN don't trigger ci.yml, so
+      # this is the only place the bump meets the upstream-contract tests
+      # (src/ipc.rs's tsc check, tests/upstream_contract.rs). A failure
+      # still opens the PR, flagged, so the break is visible and fixable.
+      - name: Test
+        id: test
+        continue-on-error: true
+        run: cargo test --locked
+
       - name: Open PR
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           commit-message: "chore: bump awakened-poe-trade submodule"
           branch: bump-awakened-poe-trade
-          title: ${{ steps.contract.outputs.title }}
-          body: ${{ steps.contract.outputs.body }}
+          title: ${{ steps.test.outcome == 'failure' && '❌ Bump awakened-poe-trade submodule (contract tests fail)' || steps.contract.outputs.title }}
+          body: |
+            ${{ steps.contract.outputs.body }}
+            ${{ steps.test.outcome == 'failure' && format('❌ **`cargo test` failed**: upstream changed something `src/` relies on. See the Test step of {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) || '' }}

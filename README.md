@@ -40,6 +40,7 @@ renderer to think it's still running inside Electron:
 |---|---|---|
 | `main.rs` | window-management bits of `OverlayWindow.ts` | Builds the layer-shell surface, toggles click-through/keyboard-focus mode, handles Escape/Ctrl+W locally while a widget is interactive, injected JS pointing the renderer's now-inert Hotkeys UI at KDE Settings |
 | `server.rs` | `server.ts`, IPC bus | Local HTTP server serving the renderer's `dist/`, plus the WebSocket event bus (`MAIN->OVERLAY`, `OVERLAY->MAIN`, etc.) the renderer expects instead of Electron IPC |
+| `ipc.rs` | `ipc/types.ts` | Every WebSocket event and the `/config` body as typed Rust; `cargo test` type-checks them against upstream's TypeScript with `tsc` |
 | `shortcuts.rs` | `shortcuts/Shortcuts.ts` | Binds hotkeys dynamically (from the renderer's own shortcut config) via the `GlobalShortcuts` portal, dispatches price-check/toggle-overlay/copy-item actions, popup auto-close |
 | `host_config.rs` | config parsing bits of `Shortcuts.ts`/`ConfigStore.ts` | Parses the renderer's `update-host-config` shortcut list and `restoreClipboard` flag; pre-registers all configurable actions with KDE so they're nameable/bindable in System Settings → Shortcuts |
 | `remote_input.rs` | `HostClipboard.ts`, synthetic key injection | Simulates Ctrl+C, reads clipboard with retry/validation, and restores it afterward via the `RemoteDesktop`/`ConnectToEIS` and `Clipboard` portals (libei), since there's no other portal-sanctioned way to inject input or read/write the clipboard on Wayland |

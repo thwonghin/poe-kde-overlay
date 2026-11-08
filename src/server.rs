@@ -6,10 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use serde_json::{Value, json};
 
 use crate::config_store::ConfigStore;
 use crate::host_config::ParsedHostConfig;
+use crate::ipc::{ClientEvent, HostState, MainEvent, TrackArea, UpdateInfo, UserAction};
 use crate::logger::Logger;
 
 // `cargo run` gets APT_KWIN_OVERLAY_DIST for free from .cargo/config.toml's
@@ -50,30 +50,6 @@ type ClientId = u64;
 struct Client {
     tx: std::sync::mpsc::Sender<String>,
     poller: Arc<polling::Poller>,
-}
-
-/// `ipc/types.ts`'s `IpcTrackArea` payload, in the overlay WebView's CSS
-/// pixels (`area` is relative to the overlay window; `from` is the position
-/// we sent with item-text, i.e. global).
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrackArea {
-    pub hold_key: String,
-    pub area: Rect,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct Rect {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl Rect {
-    pub fn contains(&self, x: f64, y: f64) -> bool {
-        x > self.x && x < self.x + self.width && y > self.y && y < self.y + self.height
-    }
 }
 
 /// Renderer requests the GTK main loop has to act on (it owns the
@@ -190,16 +166,16 @@ impl EventBus {
         }
     }
 
-    pub fn broadcast(&self, name: &str, payload: Value) {
-        let msg = json!({ "name": name, "payload": payload }).to_string();
+    pub fn broadcast(&self, event: &MainEvent) {
+        let msg = serde_json::to_string(event).unwrap();
         let clients: Vec<_> = self.clients.lock().unwrap().values().cloned().collect();
         for client in clients {
             self.send_to(&client, &msg);
         }
     }
 
-    pub fn send_last_active(&self, name: &str, payload: Value) {
-        let msg = json!({ "name": name, "payload": payload }).to_string();
+    pub fn send_last_active(&self, event: &MainEvent) {
+        let msg = serde_json::to_string(event).unwrap();
         let target = self
             .last_active
             .lock()
@@ -331,10 +307,7 @@ fn handle_websocket(
         poller: poller.clone(),
     });
     println!("[server] websocket client {id} connected");
-    events.send_last_active(
-        "MAIN->CLIENT::log-entry",
-        json!({ "message": logger.history() }),
-    );
+    events.send_last_active(&MainEvent::LogEntry { message: logger.history() });
 
     let would_block = |err: &tungstenite::Error| {
         matches!(err, tungstenite::Error::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
@@ -395,36 +368,28 @@ fn handle_client_event(
     config: &Arc<ConfigStore>,
     logger: &Arc<Logger>,
 ) {
-    let Ok(event) = serde_json::from_str::<Value>(text) else {
-        eprintln!("[server] malformed client event: {text}");
-        return;
+    // Upstream's IpcEvent is checked to only contain events ClientEvent
+    // parses (ipc.rs), so failing here means a malformed message.
+    let event = match serde_json::from_str::<ClientEvent>(text) {
+        Ok(event) => event,
+        Err(err) => {
+            eprintln!("[server] malformed client event ({err}): {text}");
+            return;
+        }
     };
-    let Some(name) = event.get("name").and_then(Value::as_str) else {
-        return;
-    };
-    let payload = event.get("payload").cloned().unwrap_or(Value::Null);
 
-    match name {
-        "CLIENT->MAIN::used-recently" => {
+    match event {
+        ClientEvent::UsedRecently { is_overlay } => {
             events.mark_active(from);
-            let is_overlay = payload
-                .get("isOverlay")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
             events.set_overlay_active(is_overlay);
         }
-        "OVERLAY->MAIN::track-area" => match serde_json::from_value::<TrackArea>(payload) {
-            Ok(area) => {
-                debug!("[server] track-area: {area:?}");
-                *events.track_area.lock().unwrap() = Some(area);
-            }
-            Err(err) => eprintln!("[server] malformed track-area: {err}"),
-        },
-        "OVERLAY->MAIN::focus-game" => {
-            events.request_ui(UiRequest::FocusGame);
+        ClientEvent::TrackArea(area) => {
+            debug!("[server] track-area: {area:?}");
+            *events.track_area.lock().unwrap() = Some(area);
         }
-        "CLIENT->MAIN::update-host-config" => {
-            let parsed = crate::host_config::parse_host_config(&payload, logger);
+        ClientEvent::FocusGame => events.request_ui(UiRequest::FocusGame),
+        ClientEvent::UpdateHostConfig(config) => {
+            let parsed = crate::host_config::parse_host_config(config, logger);
             println!(
                 "[server] update-host-config received, {} shortcut(s) after filtering, restore_clipboard={}",
                 parsed.shortcuts.len(),
@@ -433,34 +398,17 @@ fn handle_client_event(
             crate::kwin_tracker::set_window_title(&parsed.window_title);
             let _ = events.host_config_tx.try_send(parsed);
         }
-        "CLIENT->MAIN::user-action" => {
-            match payload.get("action").and_then(Value::as_str) {
-                Some("quit") => events.request_ui(UiRequest::Quit),
-                // The stash-search widget's click path (WidgetStashSearch.vue).
-                Some("stash-search") => {
-                    if let Some(text) = payload.get("text").and_then(Value::as_str) {
-                        events.request_ui(UiRequest::StashSearch(text.to_string()));
-                    }
-                }
-                _ => {}
-            }
+        ClientEvent::UserAction(UserAction::Quit) => events.request_ui(UiRequest::Quit),
+        ClientEvent::UserAction(UserAction::StashSearch { text }) => {
+            events.request_ui(UiRequest::StashSearch(text));
         }
-        "CLIENT->MAIN::save-config" => {
-            let contents = payload
-                .get("contents")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let is_temporary = payload
-                .get("isTemporary")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            config.save(contents, is_temporary, logger);
-            events.broadcast(
-                "MAIN->CLIENT::config-changed",
-                json!({ "contents": contents }),
-            );
+        ClientEvent::UserAction(
+            UserAction::CheckForUpdate | UserAction::UpdateAndRestart | UserAction::Unknown,
+        ) => {}
+        ClientEvent::SaveConfig { contents, is_temporary } => {
+            config.save(&contents, is_temporary, logger);
+            events.broadcast(&MainEvent::ConfigChanged { contents });
         }
-        _ => {}
     }
 }
 
@@ -507,12 +455,12 @@ fn handle_http(
     // The proxy forwards the query string; local files never have one.
     let file_path = path.split('?').next().unwrap_or("");
     if path == "/config" {
-        let body = json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "updater": { "state": "update-not-available", "checkedAt": started_at_ms() },
-            "contents": config.load(),
+        let body = serde_json::to_string(&HostState {
+            contents: config.load(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            updater: UpdateInfo::UpdateNotAvailable { checked_at: started_at_ms() },
         })
-        .to_string();
+        .unwrap();
         write_response(&mut stream, 200, "application/json", body.as_bytes())?;
         return Ok(());
     }
@@ -609,6 +557,7 @@ pub(crate) fn write_response_with_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     #[test]
     fn track_area_parses_renderer_payload() {
@@ -691,16 +640,16 @@ mod tests {
 
         // Server → client, immediately (was up to one 15ms read timeout).
         let started = std::time::Instant::now();
-        server.events.broadcast("MAIN->CLIENT::test", json!({ "n": 1 }));
-        assert_eq!(next_text()["payload"]["n"], 1);
+        server.events.broadcast(&MainEvent::WidgetAction { target: "t".into() });
+        assert_eq!(next_text()["payload"]["target"], "t");
         assert!(started.elapsed() < Duration::from_millis(500));
 
         // Bigger than any socket buffer: exercises the WouldBlock/flush path.
         let big = "x".repeat(8 * 1024 * 1024);
-        server.events.broadcast("MAIN->CLIENT::big", json!({ "s": big }));
-        server.events.broadcast("MAIN->CLIENT::after-big", Value::Null);
-        assert_eq!(next_text()["payload"]["s"].as_str().unwrap().len(), big.len());
-        assert_eq!(next_text()["name"], "MAIN->CLIENT::after-big");
+        server.events.broadcast(&MainEvent::LogEntry { message: big.clone() });
+        server.events.broadcast(&MainEvent::OverlayAttached);
+        assert_eq!(next_text()["payload"]["message"].as_str().unwrap().len(), big.len());
+        assert_eq!(next_text()["name"], "MAIN->OVERLAY::overlay-attached");
 
         // Client → server.
         ws.send(tungstenite::Message::Text(
@@ -737,12 +686,12 @@ mod tests {
         };
 
         // A newly connected client is last-active; used-recently moves it.
-        bus.send_last_active("e", Value::Null);
+        bus.send_last_active(&MainEvent::OverlayAttached);
         assert_eq!(received(&inboxes), [2]);
         bus.mark_active(ids[0]);
-        bus.send_last_active("e", Value::Null);
+        bus.send_last_active(&MainEvent::OverlayAttached);
         assert_eq!(received(&inboxes), [0]);
-        bus.broadcast("e", Value::Null);
+        bus.broadcast(&MainEvent::OverlayAttached);
         assert_eq!(received(&inboxes), [0, 1, 2]);
 
         // A browser tab reported isOverlay:false.
@@ -750,14 +699,14 @@ mod tests {
         // Closing a client that isn't last-active changes nothing.
         bus.remove_client(ids[2]);
         assert!(!bus.overlay_was_used_recently());
-        bus.send_last_active("e", Value::Null);
+        bus.send_last_active(&MainEvent::OverlayAttached);
         assert_eq!(received(&inboxes), [0]);
 
         // Closing the last-active one leaves exactly one: it inherits
         // last-active and is re-trusted as the overlay (server.ts).
         bus.remove_client(ids[0]);
         assert!(bus.overlay_was_used_recently());
-        bus.send_last_active("e", Value::Null);
+        bus.send_last_active(&MainEvent::OverlayAttached);
         assert_eq!(received(&inboxes), [1]);
     }
 
