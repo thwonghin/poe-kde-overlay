@@ -13,7 +13,7 @@ From a full read of `src/` plus CI/packaging (2026-11-07). Fixed so far:
   env-mutating test.
 - **`a90cabf`:** live Log tab entries running together (no newline);
   per-modifier EIS console spam; history-style comments.
-- **Follow-up commit:** CI now runs `cargo test` and clippy
+- **`40dce72`:** CI now runs `cargo test` and clippy
   (`-D warnings`); key release before Ctrl+C uses the trigger KDE actually
   has bound (bind response + `ShortcutsChanged`, falling back to the
   renderer's shortcut when the description can't be parsed); the tracker
@@ -30,30 +30,28 @@ From a full read of `src/` plus CI/packaging (2026-11-07). Fixed so far:
   timeout — no idle wakeups (62/s → ~0 measured), and queued messages go
   out immediately.
 
-Still open:
+- **`841d33b`:** the price-check clipboard poll wakes when PoE takes the
+  clipboard instead of always sleeping 48ms first (49-50ms → 3-10ms
+  Ctrl+C to item text, measured live); popup tracker decision, held
+  modifier and debounce pulled out as pure, unit-tested functions.
+- **`7f4a6bb`:**
+  - Clipboard race: if PoE copied before our clear, the clear erased its
+    item text and the check timed out. A clipboard change that brings no
+    item text now triggers one more Ctrl+C. The timeout message now says
+    whether the clipboard changed at all.
+  - Settings banner works in every UI language: the injected script loads
+    the active language's `app_i18n.json` and matches on English or that
+    translation (checked against mock tabs in en/ru/ko/cmn-Hant).
+  - (docs) Dropped "500ms KWin script timeout is a guess": cursor queries measure
+    1.0ms median, 1.8ms max (50 queries against a live KWin), so 500ms is
+    over 250× headroom.
 
-## 1. Possible race in `copy_item_text`
-
-`remote_input.rs`: presses Ctrl+C, reads the clipboard (`previous`), then
-clears it and polls. If PoE finishes copying *before* that first read, the
-clear erases the fresh item text and the check fails with "clipboard poll
-timed out". Works in testing, so PoE is evidently slower than that read.
-Revisit if those timeouts show up intermittently.
-
-## 2. 500ms KWin script timeout is a guess
-
-`kwin_tracker.rs`'s `SCRIPT_TIMEOUT` bounds each disposable-script round
-trip (cursor query, activate PoE). Picked, not measured. If `never replied`
-shows up in the log during normal play, raise it — the auto-close poll just
-skips that tick, but a price check fails outright.
+Nothing open beyond the deliberate simplifications below.
 
 ## Known simplifications (`ponytail:` notes in the code)
 
 Deliberate, each with a stated ceiling; listed so they're not forgotten.
 
-- **English-only Settings detection** (`main.rs`, `HOTKEY_UI_INFO_JS`): the
-  hotkey tabs are found by English label text; in other languages the
-  original hotkey UI stays visible instead of the KDE banner.
 - **Alt-hold hide only un-hides on modifier changes**
   (`overlay_visibility.rs`): upstream also un-hides on any key or mouse
   move while Alt is held; we only see modifier transitions.
