@@ -27,12 +27,15 @@ pub fn spawn(overlay: Rc<Overlay>, shortcuts_rx: async_channel::Receiver<Vec<Sho
     });
 }
 
-/// Every NewShortcut we've ever wanted bound (keyed by id, never shrinks),
-/// the current id → action dispatch map, and the trigger KDE actually has
-/// bound per id (renderer format, see `host_config::trigger_to_shortcut`).
+/// Every shortcut we've ever wanted bound (id → (description, preferred
+/// portal trigger); never shrinks, persisted across launches), the current
+/// id → action dispatch map, and the trigger KDE actually has bound per id
+/// (renderer format, see `host_config::trigger_to_shortcut`).
 #[derive(Default)]
 struct Bindings {
-    all_shortcuts: HashMap<String, NewShortcut>,
+    all_shortcuts: HashMap<String, (String, String)>,
+    /// Whether this session has called BindShortcuts yet.
+    bound: bool,
     dispatch: HashMap<String, ShortcutAction>,
     triggers: HashMap<String, String>,
 }
@@ -61,6 +64,32 @@ impl Bindings {
     }
 }
 
+/// `all_shortcuts` from the last launch. KDE shows its "new shortcuts"
+/// dialog for every id a BindShortcuts call adds, and (see
+/// `apply_shortcuts`) forgets ids a call leaves out: without this, the
+/// startup bind dropped the renderer-only ones (paste-in-chat, stash-search)
+/// and KDE re-asked about them each time a renderer sent its config.
+/// ponytail: never pruned; a removed chat command stays listed in KDE's
+/// settings (inert). Prune if the list gets cluttered.
+fn known_shortcuts_path() -> std::path::PathBuf {
+    crate::xdg::data_dir().join("poe-kde-overlay/shortcuts.json")
+}
+
+fn load_known_shortcuts() -> HashMap<String, (String, String)> {
+    std::fs::read_to_string(known_shortcuts_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+fn save_known_shortcuts(all: &HashMap<String, (String, String)>) {
+    let path = known_shortcuts_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, serde_json::to_string(all).unwrap_or_default());
+}
+
 fn shortcut_description(action: &ActionKind) -> String {
     match action {
         // Matches real APT's own action type name and hotkeys.vue's row
@@ -83,7 +112,8 @@ fn shortcut_description(action: &ActionKind) -> String {
     }
 }
 
-/// Binds any actions not already bound this session and refreshes the
+/// Binds the session once, then again only when `actions` has an id not
+/// known yet (this launch or an earlier one), and refreshes the
 /// dispatch map from `actions`. Confirmed empirically against a live KDE
 /// session: the portal's own doc calls BindShortcuts additive, but KDE's
 /// kglobalaccel backend replaces this app-id's *entire* persisted grant set
@@ -112,21 +142,33 @@ async fn apply_shortcuts(
             // entries) → no preferred trigger, so it still shows up in KDE's
             // Global Shortcuts settings as a bindable-but-unset entry.
             let trigger = crate::host_config::to_portal_trigger(&action.shortcut);
-            let preferred_trigger = (!trigger.is_empty()).then_some(trigger.as_str());
-            let new_shortcut = NewShortcut::new(id.clone(), shortcut_description(&action.action))
-                .preferred_trigger(preferred_trigger);
-            bindings.borrow_mut().all_shortcuts.insert(id.clone(), new_shortcut);
+            let description = shortcut_description(&action.action);
+            bindings.borrow_mut().all_shortcuts.insert(id.clone(), (description, trigger));
             added_new = true;
         }
         fresh_dispatch.insert(id, action);
     }
 
-    if added_new {
-        let full_list: Vec<NewShortcut> = bindings.borrow().all_shortcuts.values().cloned().collect();
+    if added_new || !bindings.borrow().bound {
+        let full_list: Vec<NewShortcut> = bindings
+            .borrow()
+            .all_shortcuts
+            .iter()
+            .map(|(id, (description, trigger))| {
+                // Empty trigger: no preferred one, see above.
+                NewShortcut::new(id.clone(), description.clone())
+                    .preferred_trigger((!trigger.is_empty()).then_some(trigger.as_str()))
+            })
+            .collect();
         let request = proxy
             .bind_shortcuts(session, &full_list, window_id, BindShortcutsOptions::default())
             .await?;
-        bindings.borrow_mut().record_triggers(request.response()?.shortcuts());
+        let mut bindings = bindings.borrow_mut();
+        bindings.record_triggers(request.response()?.shortcuts());
+        bindings.bound = true;
+        if added_new {
+            save_known_shortcuts(&bindings.all_shortcuts);
+        }
     }
 
     bindings.borrow_mut().dispatch = fresh_dispatch;
@@ -168,7 +210,10 @@ async fn run(
     // configure, not just the 3 with a sensible default trigger — our
     // Hotkeys/Item Info tabs no longer expose them, so KDE's own Global
     // Shortcuts settings are the only place a user can find them.
-    let bindings = Rc::new(RefCell::new(Bindings::default()));
+    let bindings = Rc::new(RefCell::new(Bindings {
+        all_shortcuts: load_known_shortcuts(),
+        ..Default::default()
+    }));
     let mut initial_actions = default_actions();
     initial_actions.extend(extra_registerable_actions());
     apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, initial_actions).await?;
