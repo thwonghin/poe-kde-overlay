@@ -5,6 +5,11 @@ Linux: [Awakened PoE Trade](https://github.com/SnosMe/awakened-poe-trade) (APT) 
 PoE1 and its fork [Exiled Exchange 2](https://github.com/kvan7/Exiled-Exchange-2)
 (EE2) for PoE2.
 
+> [!WARNING]
+> Everything in this repo except the vendored submodules (`vendor/`) is
+> LLM-written ("vibe coded"). It has had only light human review and has
+> been tested on one KDE setup. Use it at your own risk.
+
 APT's overlay uses Electron and X11 APIs for hotkeys, click-through, input
 injection and clipboard capture, so it doesn't work under Wayland. This
 project replaces APT's Electron `main` process with a small Rust/GTK4 host
