@@ -25,6 +25,10 @@ From a full read of `src/` plus CI/packaging (2026-11-07). Fixed so far:
   restarts (new pid); 10s read timeout on HTTP connections and a 30s
   timeout on proxied requests; the proxy passes any method through; per-event
   logging behind `APT_KWIN_OVERLAY_DEBUG`.
+- **`b4c0d38`:** WebSocket client threads sleep on a `polling` poller
+  (socket readiness + a notify from senders) instead of a 15ms read
+  timeout — no idle wakeups (62/s → ~0 measured), and queued messages go
+  out immediately.
 
 Still open:
 
@@ -42,15 +46,6 @@ Revisit if those timeouts show up intermittently.
 trip (cursor query, activate PoE). Picked, not measured. If `never replied`
 shows up in the log during normal play, raise it — the auto-close poll just
 skips that tick, but a price check fails outright.
-
-## 3. WebSocket threads poll every 15ms
-
-`server.rs`'s `handle_websocket` wakes each client thread ~66 times a
-second (read timeout) so queued outgoing messages get written. Cheap with
-one or two clients, and deliberate (see the comment on `Client`); an
-evented socket would remove the idle wakeups but means a different WS
-setup (e.g. splitting the socket, or an async runtime). Not worth it
-unless it shows up in a profile.
 
 ## Known simplifications (`ponytail:` notes in the code)
 
