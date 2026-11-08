@@ -213,6 +213,7 @@ pub fn spawn() -> std::io::Result<(u16, Server)> {
     let (event_bus, focus_game_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx) =
         EventBus::new();
     let events = Arc::new(event_bus);
+    started_at_ms();
     let server = Server {
         events: events.clone(),
         config: Arc::new(ConfigStore::new()),
@@ -426,7 +427,7 @@ fn handle_http(
     if path == "/config" {
         let body = json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "updater": { "state": "update-not-available", "checkedAt": 0 },
+            "updater": { "state": "update-not-available", "checkedAt": started_at_ms() },
             "contents": config.load(),
         })
         .to_string();
@@ -443,6 +444,17 @@ fn handle_http(
     }
 
     serve_static(&mut stream, &path)
+}
+
+/// Process start time, reported as the updater's `checkedAt` — `0` made the
+/// About page render "last checked" as 1970.
+fn started_at_ms() -> u64 {
+    static STARTED_AT: OnceLock<u64> = OnceLock::new();
+    *STARTED_AT.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64)
+    })
 }
 
 fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {

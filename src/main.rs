@@ -349,6 +349,7 @@ fn build_ui(app: &Application) {
         let price_check_open_for_tracker = price_check_open.clone();
         let price_check_locked_for_tracker = price_check_locked.clone();
         let kwin_connection_for_tracker = kwin_connection.clone();
+        let mut attached = false;
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
@@ -381,6 +382,16 @@ fn build_ui(app: &Application) {
                                 w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                             );
                             move_overlay_to_window_monitor(&window, &w, &click_through_for_monitor);
+                            // Real APT sends this when electron-overlay-window
+                            // first attaches to PoE; drives the renderer's
+                            // "overlay ready" toast (LoadingAnimation.vue).
+                            // ponytail: once per process — PoE restarts
+                            // aren't detected, so no re-toast on relaunch.
+                            if !attached {
+                                attached = true;
+                                events_for_tracker
+                                    .broadcast("MAIN->OVERLAY::overlay-attached", serde_json::Value::Null);
+                            }
                             // Mirrors real APT's handlePoeWindowActiveChange:
                             // PoE *regaining* focus forces any
                             // locked/interactive overlay state back to

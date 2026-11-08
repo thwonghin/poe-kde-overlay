@@ -37,7 +37,11 @@ pub enum ActionKind {
         #[serde(default)]
         focus_overlay: bool,
     },
-    // ocr-text / trigger-event / stash-search / paste-in-chat / test-only —
+    // Real Shortcuts.ts just broadcasts MAIN->CLIENT::widget-action for
+    // this (stopwatch start/stop/reset, delve-grid toggle) — no input
+    // injection involved.
+    TriggerEvent { target: String },
+    // ocr-text / stash-search / paste-in-chat / test-only —
     // not implemented yet (need EIS text-injection + clipboard-write
     // primitives that don't exist in remote_input.rs), parsed but inert.
     #[serde(other)]
@@ -279,6 +283,7 @@ pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
             target,
             focus_overlay,
         } => Some(format!("copy-item-{}-{}", slug(target), focus_overlay)),
+        ActionKind::TriggerEvent { target } => Some(format!("trigger-event-{}", slug(target))),
         ActionKind::Unsupported => None,
     }
 }
@@ -339,6 +344,7 @@ mod tests {
                 { "shortcut": "Ctrl + D", "action": { "type": "copy-item", "target": "price-check", "focusOverlay": false } },
                 { "shortcut": "Shift + Space", "action": { "type": "toggle-overlay" } },
                 { "shortcut": "Ctrl + Shift + S", "action": { "type": "stash-search", "text": "foo" } },
+                { "shortcut": "Ctrl + T", "action": { "type": "trigger-event", "target": "delve-grid" } },
             ],
             "restoreClipboard": true,
             "clientLog": null,
@@ -351,13 +357,17 @@ mod tests {
         });
 
         let parsed = parse_host_config(&payload, &test_logger());
-        assert_eq!(parsed.shortcuts.len(), 3);
+        assert_eq!(parsed.shortcuts.len(), 4);
         assert!(matches!(
             parsed.shortcuts[0].action,
             ActionKind::CopyItem { ref target, focus_overlay: false } if target == "price-check"
         ));
         assert!(matches!(parsed.shortcuts[1].action, ActionKind::ToggleOverlay));
         assert!(matches!(parsed.shortcuts[2].action, ActionKind::Unsupported));
+        assert!(matches!(
+            parsed.shortcuts[3].action,
+            ActionKind::TriggerEvent { ref target } if target == "delve-grid"
+        ));
         assert!(parsed.restore_clipboard);
     }
 

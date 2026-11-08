@@ -183,6 +183,7 @@ async fn apply_shortcuts(
                     target,
                     focus_overlay: false,
                 } => format!("Copy item ({target})"),
+                ActionKind::TriggerEvent { target } => format!("Widget action ({target})"),
                 ActionKind::Unsupported => unreachable!(),
             };
             // Empty shortcut (extra_registerable_actions' unset-by-default
@@ -344,6 +345,9 @@ async fn run(
                     restore_clipboard,
                 )
                 .await
+            }
+            ActionKind::TriggerEvent { target } => {
+                events.broadcast("MAIN->CLIENT::widget-action", json!({ "target": target }))
             }
             ActionKind::Unsupported => {}
         }

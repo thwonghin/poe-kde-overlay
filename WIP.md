@@ -32,7 +32,7 @@ us, doesn't capture the user's real mouse wheel), and no window-bounds-based
 region logic. Not attempted. The `stashScroll` config field isn't parsed
 either — relevant if this is ever picked up.
 
-## 2. Hotkey actions not yet bound: paste-in-chat, trigger-event, stash-search
+## 2. Hotkey actions not yet bound: paste-in-chat, stash-search
 
 Parsed as `ActionKind::Unsupported` (inert) in `host_config.rs`. Closer than
 it looks: `main/src/shortcuts/text-box.ts`'s `typeInChat`/`stashSearch` are
@@ -45,7 +45,10 @@ keys), and the clipboard-write wrapper these sequences need
 `set_selection`/`selection_write`/`selection_write_done`) already exists,
 built for the clipboard-restore work. Remaining work is just evdev keycode
 constants for the extra keys and a generic multi-key-tap helper — no new
-portal capability needed.
+portal capability needed. The same `stashSearch` helper also backs
+`CLIENT->MAIN::user-action {action:"stash-search"}` (the stash-search
+widget's click path, `WidgetStashSearch.vue`), which `server.rs` currently
+ignores — wire both when this lands.
 
 ## 3. No hover-to-interact / hold-modifier-to-pin for the price-check popup
 
