@@ -3,13 +3,13 @@
 PoE2 runs through the EE2 renderer as a peer of PoE1 (`bb10c52`, CI in
 `bf410c9`). Price-check works. These are what's still missing or assumed.
 
-## Pending live check (uncommitted)
+## Pending live check
 
 - **`search-same-priced` hotkey.** EE2-only copy-item target, now in
   `extra_registerable_actions` (`src/host_config.rs`) with a drift test
   (`every_vendor_copy_item_target_is_registerable`). Check that "Copy item
   (search-same-priced)" shows up in System Settings → Shortcuts →
-  apt-kwin-overlay, bind it, and try it in PoE2. Then commit.
+  poe-kde-overlay, bind it, and try it in PoE2.
 
 ## Gaps
 

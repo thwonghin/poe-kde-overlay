@@ -1,4 +1,4 @@
-/// `println!` only when `APT_KWIN_OVERLAY_DEBUG` is set: per-event chatter
+/// `println!` only when `POE_KDE_OVERLAY_DEBUG` is set: per-event chatter
 /// (window activations, hotkey dispatch, popup tracking). Lifecycle
 /// messages and errors stay on unconditionally.
 macro_rules! debug {
@@ -11,7 +11,7 @@ macro_rules! debug {
 
 pub(crate) fn debug_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("APT_KWIN_OVERLAY_DEBUG").is_some())
+    *ENABLED.get_or_init(|| std::env::var_os("POE_KDE_OVERLAY_DEBUG").is_some())
 }
 
 mod config_store;
@@ -43,7 +43,7 @@ use kwin_tracker::TrackerEvent;
 use webkit6::WebView;
 use webkit6::prelude::*;
 
-pub(crate) const APP_ID: &str = "io.github.thwonghin.AptKwinOverlay";
+pub(crate) const APP_ID: &str = "io.github.thwonghin.PoeKdeOverlay";
 
 // Hotkeys are configured exclusively through KDE's own Global Shortcuts
 // (System Settings, or ashpd's ConfigureShortcuts), not the renderer's own
@@ -285,7 +285,7 @@ fn build_ui(app: &Application) {
     }
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("apt-kwin-overlay")
+        .title("poe-kde-overlay")
         .build();
 
     window.init_layer_shell();
@@ -323,7 +323,7 @@ fn build_ui(app: &Application) {
         Err(err) => {
             eprintln!("[main] failed to start local server: {err}");
             let dialog = gtk4::AlertDialog::builder()
-                .message("apt-kwin-overlay failed to start")
+                .message("poe-kde-overlay failed to start")
                 .detail(format!("Could not start the local server: {err}"))
                 .build();
             let app = app.clone();
@@ -358,7 +358,7 @@ fn build_ui(app: &Application) {
                         );
                     }
                     tray::TrayAction::OpenConfigFolder => {
-                        let path = xdg::data_dir().join("apt-kwin-overlay");
+                        let path = xdg::data_dir().join("poe-kde-overlay");
                         let uri = gtk4::gio::File::for_path(&path).uri();
                         let _ = gtk4::gio::AppInfo::launch_default_for_uri(&uri, gtk4::gio::AppLaunchContext::NONE);
                     }

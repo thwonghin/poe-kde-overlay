@@ -5,10 +5,10 @@ use zbus::interface;
 
 use crate::game::Game;
 
-const PLUGIN_NAME: &str = "apt-kwin-overlay-tracker";
-const CALLBACK_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.Callback";
+const PLUGIN_NAME: &str = "poe-kde-overlay-tracker";
+const CALLBACK_IFACE: &str = "io.github.thwonghin.PoeKdeOverlay.Callback";
 const CALLBACK_PATH: &str = "/";
-const CURSOR_QUERY_IFACE: &str = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback";
+const CURSOR_QUERY_IFACE: &str = "io.github.thwonghin.PoeKdeOverlay.CursorPosCallback";
 
 /// Each game renderer's `windowTitle` setting (CLIENT->MAIN::update-host-
 /// config), lowercased + trimmed, indexed like `Game::ALL`. Real APT/EE2
@@ -120,7 +120,7 @@ struct Callback {
     sender: async_channel::Sender<TrackerEvent>,
 }
 
-#[interface(name = "io.github.thwonghin.AptKwinOverlay.Callback")]
+#[interface(name = "io.github.thwonghin.PoeKdeOverlay.Callback")]
 impl Callback {
     async fn activated(&self, json: String) {
         match serde_json::from_str::<WindowEvent>(&json) {
@@ -239,7 +239,7 @@ struct CursorPosCallback {
     sender: async_channel::Sender<(f64, f64, bool)>,
 }
 
-#[interface(name = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback")]
+#[interface(name = "io.github.thwonghin.PoeKdeOverlay.CursorPosCallback")]
 impl CursorPosCallback {
     async fn cursor_pos(&self, json: String) {
         match serde_json::from_str::<CursorPos>(&json) {
@@ -312,7 +312,7 @@ pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f6
     static QUERY_COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = QUERY_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = format!("/query{id}");
-    let plugin_name = format!("apt-kwin-overlay-cursor-{id}");
+    let plugin_name = format!("poe-kde-overlay-cursor-{id}");
 
     let (tx, rx) = async_channel::bounded(1);
     connection
@@ -355,7 +355,7 @@ pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f6
 pub async fn activate_path_of_exile(connection: &zbus::Connection) -> zbus::Result<()> {
     static ACTIVATE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = ACTIVATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let plugin_name = format!("apt-kwin-overlay-activate-{id}");
+    let plugin_name = format!("poe-kde-overlay-activate-{id}");
 
     let script = format!(
         "{}var candidates = workspace.windowList().filter(isPoe);\n\

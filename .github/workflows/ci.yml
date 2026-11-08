@@ -45,7 +45,7 @@ jobs:
       # cargo/npm dependency compilation is most of this job's runtime.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: apt-kwin-overlay
+          shared-key: poe-kde-overlay
 
       - name: Cache npm dependencies
         uses: actions/cache@v6

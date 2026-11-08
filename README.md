@@ -1,4 +1,4 @@
-# apt-kwin-overlay
+# poe-kde-overlay
 
 A native KWin/Wayland backend for the Path of Exile price-check overlays on
 Linux: [Awakened PoE Trade](https://github.com/SnosMe/awakened-poe-trade) (APT) for
@@ -14,7 +14,7 @@ WebSocket and HTTP protocol. The build uses only each submodule's
 `renderer/`, never its `main/`.
 
 The two games are equal peers. Each gets its own local server, settings and
-uploads (`~/.local/share/apt-kwin-overlay/poe1/` and `poe2/`). The overlay
+uploads (`~/.local/share/poe-kde-overlay/poe1/` and `poe2/`). The overlay
 shows the renderer of whichever game is focused, and reloads to the other
 one when you switch games. The tray menu opens either game's settings in
 the browser at any time. Hotkeys are shared: one KDE binding works in both
@@ -24,7 +24,7 @@ games.
 
 ```mermaid
 flowchart LR
-    R["APT / EE2 renderer<br/>(unmodified Vue)"] <-->|HTTP / WebSocket| H["apt-kwin-overlay<br/>(Rust + GTK4)"]
+    R["APT / EE2 renderer<br/>(unmodified Vue)"] <-->|HTTP / WebSocket| H["poe-kde-overlay<br/>(Rust + GTK4)"]
     H -->|renders the UI| W[WebKitGTK]
     H -->|overlay surface| L[gtk4-layer-shell]
     H -->|hotkeys, input, clipboard| P[xdg-desktop-portal]
@@ -101,13 +101,13 @@ looks for.
 ### Installing on Arch with the PKGBUILD
 
 ```sh
-git clone https://github.com/thwonghin/apt-kwin-overlay.git
-cd apt-kwin-overlay
+git clone https://github.com/thwonghin/poe-kde-overlay.git
+cd poe-kde-overlay
 makepkg -si
 ```
 
-This installs the `apt-kwin-overlay` binary to `/usr/bin` and the renderers
-to `/usr/share/apt-kwin-overlay/poe1` and `poe2`.
+This installs the `poe-kde-overlay` binary to `/usr/bin` and the renderers
+to `/usr/share/poe-kde-overlay/poe1` and `poe2`.
 
 ## Running
 
@@ -129,13 +129,13 @@ toggles the overlay, Ctrl+D runs a price-check and Ctrl+Alt+D runs a locked
 price-check. Escape or Ctrl+W closes an open popup.
 
 To change hotkeys, open KDE's System Settings → Shortcuts and search for
-"apt-kwin-overlay". Both renderers' Hotkeys and Item Info settings tabs show a
+"poe-kde-overlay". Both renderers' Hotkeys and Item Info settings tabs show a
 banner pointing there instead. KDE's `GlobalShortcuts` portal gives the app
 no way to rebind a key the user already granted, which Electron's
 global-shortcut API could do. The doc comments in `host_config.rs` have the
 details.
 
-To troubleshoot, run `APT_KWIN_OVERLAY_DEBUG=1 cargo run --release`. The
+To troubleshoot, run `POE_KDE_OVERLAY_DEBUG=1 cargo run --release`. The
 terminal then also shows window activations, hotkey dispatch and popup
 tracking.
 

@@ -1,5 +1,5 @@
 [package]
-name = "apt-kwin-overlay"
+name = "poe-kde-overlay"
 version = "0.1.0"
 edition = "2024"
 

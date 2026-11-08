@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn temporary_save_switches_to_tmp_file_for_good() {
-        let dir = std::env::temp_dir().join(format!("apt-config-store-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("poe-config-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("config.json");
         let store = ConfigStore::new(path.clone());

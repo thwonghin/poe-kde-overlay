@@ -1,14 +1,14 @@
 # Maintainer: Hin Wong <fraywong@gmail.com>
-pkgname=apt-kwin-overlay
+pkgname=poe-kde-overlay
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Native KWin/Wayland backend for Awakened PoE Trade (PoE1) and Exiled Exchange 2 (PoE2)"
 arch=('x86_64')
-url="https://github.com/thwonghin/apt-kwin-overlay"
+url="https://github.com/thwonghin/poe-kde-overlay"
 license=('MIT')
 depends=('gtk4' 'gtk4-layer-shell' 'webkitgtk-6.0')
 makedepends=('git' 'rust' 'nodejs' 'npm')
-source=("$pkgname::git+https://github.com/thwonghin/apt-kwin-overlay.git")
+source=("$pkgname::git+https://github.com/thwonghin/poe-kde-overlay.git")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -46,11 +46,11 @@ check() {
 
 package() {
   cd "$pkgname"
-  install -Dm755 target/release/apt-kwin-overlay "$pkgdir/usr/bin/apt-kwin-overlay"
-  install -d "$pkgdir/usr/share/apt-kwin-overlay"
-  cp -r vendor/awakened-poe-trade/renderer/dist "$pkgdir/usr/share/apt-kwin-overlay/poe1"
-  cp -r vendor/exiled-exchange-2/renderer/dist "$pkgdir/usr/share/apt-kwin-overlay/poe2"
+  install -Dm755 target/release/poe-kde-overlay "$pkgdir/usr/bin/poe-kde-overlay"
+  install -d "$pkgdir/usr/share/poe-kde-overlay"
+  cp -r vendor/awakened-poe-trade/renderer/dist "$pkgdir/usr/share/poe-kde-overlay/poe1"
+  cp -r vendor/exiled-exchange-2/renderer/dist "$pkgdir/usr/share/poe-kde-overlay/poe2"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-  install -Dm644 data/io.github.thwonghin.AptKwinOverlay.desktop \
-    "$pkgdir/usr/share/applications/io.github.thwonghin.AptKwinOverlay.desktop"
+  install -Dm644 data/io.github.thwonghin.PoeKdeOverlay.desktop \
+    "$pkgdir/usr/share/applications/io.github.thwonghin.PoeKdeOverlay.desktop"
 }

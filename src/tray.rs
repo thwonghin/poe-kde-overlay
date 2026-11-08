@@ -33,12 +33,12 @@ impl Tray for AppTray {
     }
 
     fn title(&self) -> String {
-        "apt-kwin-overlay".into()
+        "poe-kde-overlay".into()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: format!("apt-kwin-overlay v{}", env!("CARGO_PKG_VERSION")),
+            title: format!("poe-kde-overlay v{}", env!("CARGO_PKG_VERSION")),
             ..Default::default()
         }
     }

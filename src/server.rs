@@ -711,7 +711,7 @@ mod tests {
         let events = Arc::new(bus);
         let logger = Arc::new(Logger::new());
         logger.attach(events.clone());
-        let dir = std::env::temp_dir().join(format!("apt-client-events-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("poe-client-events-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let config = Arc::new(ConfigStore::new(dir.join("config.json")));
         let (tx, inbox) = std::sync::mpsc::channel();

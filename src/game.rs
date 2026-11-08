@@ -43,8 +43,8 @@ impl Game {
     /// otherwise this falls back to where the PKGBUILD installs it.
     pub fn dist_dir(self) -> PathBuf {
         let var = match self {
-            Game::Poe1 => "APT_KWIN_OVERLAY_POE1_DIST",
-            Game::Poe2 => "APT_KWIN_OVERLAY_POE2_DIST",
+            Game::Poe1 => "POE_KDE_OVERLAY_POE1_DIST",
+            Game::Poe2 => "POE_KDE_OVERLAY_POE2_DIST",
         };
         resolve_dist_dir(self, std::env::var_os(var))
     }
@@ -56,7 +56,7 @@ impl Game {
 
     /// Per-game config.json and uploads/.
     pub fn data_dir(self) -> PathBuf {
-        crate::xdg::data_dir().join("apt-kwin-overlay").join(self.name())
+        crate::xdg::data_dir().join("poe-kde-overlay").join(self.name())
     }
 
     /// PoE2 only copies advanced mod descriptions (tiers, ranges) with its
@@ -73,7 +73,7 @@ impl Game {
 fn resolve_dist_dir(game: Game, env_override: Option<std::ffi::OsString>) -> PathBuf {
     env_override
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/share/apt-kwin-overlay").join(game.name()))
+        .unwrap_or_else(|| PathBuf::from("/usr/share/poe-kde-overlay").join(game.name()))
 }
 
 // Test-only readers of the vendored upstream sources, for drift checks of
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn dist_dir_falls_back_to_system_path_without_override() {
-        assert_eq!(resolve_dist_dir(Game::Poe2, None), PathBuf::from("/usr/share/apt-kwin-overlay/poe2"));
+        assert_eq!(resolve_dist_dir(Game::Poe2, None), PathBuf::from("/usr/share/poe-kde-overlay/poe2"));
         assert_eq!(resolve_dist_dir(Game::Poe1, Some("/x".into())), PathBuf::from("/x"));
     }
 }
