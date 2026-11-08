@@ -59,6 +59,14 @@ jobs:
       - name: Build backend
         run: cargo build --release --locked
 
+      # Arch's `rust` package ships clippy. Tests need no display: nothing
+      # in them starts GTK.
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
       - name: Validate PKGBUILD
         # Full `makepkg` would re-fetch the source via its own git+ URL,
         # which is redundant with the checkout above -- just confirm the

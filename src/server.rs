@@ -265,6 +265,9 @@ fn handle_connection(
     config: &Arc<ConfigStore>,
     logger: &Arc<Logger>,
 ) -> std::io::Result<()> {
+    // A client that connects and stalls would otherwise hold this thread
+    // forever. The WebSocket path replaces this with its own short timeout.
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut peek_buf = [0u8; 1024];
     let n = stream.peek(&mut peek_buf)?;
     let first_line_end = peek_buf[..n].iter().position(|&b| b == b'\r').unwrap_or(n);
@@ -374,7 +377,7 @@ fn handle_client_event(
         }
         "OVERLAY->MAIN::track-area" => match serde_json::from_value::<TrackArea>(payload) {
             Ok(area) => {
-                println!("[server] track-area: {area:?}");
+                debug!("[server] track-area: {area:?}");
                 *events.track_area.lock().unwrap() = Some(area);
             }
             Err(err) => eprintln!("[server] malformed track-area: {err}"),

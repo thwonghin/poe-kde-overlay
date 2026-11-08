@@ -22,14 +22,36 @@ fn configured_title() -> String {
     WINDOW_TITLE.read().unwrap().clone()
 }
 
+// The one definition of "is this PoE": used by `is_path_of_exile` here and
+// generated into the activate script's JS by `poe_matcher_js`.
+const POE_CLASS_SUBSTRING: &str = "pathofexile";
+const POE_CAPTIONS: &[&str] = &["path of exile", "path of exile 2"];
+
 fn is_path_of_exile(class_name: &str, caption: &str) -> bool {
     let class = class_name.to_ascii_lowercase();
     let caption = caption.trim().to_ascii_lowercase();
     let title = configured_title();
-    class.contains("pathofexile")
-        || caption == "path of exile"
-        || caption == "path of exile 2"
+    class.contains(POE_CLASS_SUBSTRING)
+        || POE_CAPTIONS.contains(&caption.as_str())
         || (!title.is_empty() && caption == title)
+}
+
+/// `is_path_of_exile` as a JS function `isPoe(w)` over a KWin window,
+/// with the current configured title baked in.
+fn poe_matcher_js() -> String {
+    format!(
+        r#"function isPoe(w) {{
+    var className = (w.resourceClass || "").toLowerCase();
+    var caption = (w.caption || "").trim().toLowerCase();
+    var title = {title};
+    return className.indexOf({class}) !== -1 || {captions}.indexOf(caption) !== -1
+        || (title !== "" && caption === title);
+}}
+"#,
+        title = serde_json::Value::String(configured_title()),
+        class = serde_json::Value::String(POE_CLASS_SUBSTRING.to_string()),
+        captions = serde_json::json!(POE_CAPTIONS),
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,7 +89,8 @@ impl WindowEvent {
 #[derive(Debug)]
 pub enum TrackerEvent {
     Activated(WindowEvent),
-    GeometryChanged(WindowEvent),
+    /// The window moved to another output (monitor).
+    OutputChanged(WindowEvent),
 }
 
 struct Callback {
@@ -85,13 +108,12 @@ impl Callback {
         }
     }
 
-    #[allow(non_snake_case)]
-    async fn geometryChanged(&self, json: String) {
+    async fn output_changed(&self, json: String) {
         match serde_json::from_str::<WindowEvent>(&json) {
             Ok(event) => {
-                let _ = self.sender.send(TrackerEvent::GeometryChanged(event)).await;
+                let _ = self.sender.send(TrackerEvent::OutputChanged(event)).await;
             }
-            Err(err) => eprintln!("[kwin_tracker] bad geometryChanged payload: {err}"),
+            Err(err) => eprintln!("[kwin_tracker] bad outputChanged payload: {err}"),
         }
     }
 }
@@ -110,8 +132,11 @@ function emit(kind, w) {{
         height: w.frameGeometry.height
     }}));
 }}
+// outputChanged, not frameGeometryChanged: the latter fires on every frame
+// of every window's move/resize, and only a monitor change matters to us.
+// Guarded so a KWin without it still gets activation tracking.
 function hook(w) {{
-    w.frameGeometryChanged.connect(function () {{ emit("GeometryChanged", w); }});
+    if (w.outputChanged) w.outputChanged.connect(function () {{ emit("OutputChanged", w); }});
 }}
 workspace.windowList().forEach(hook);
 workspace.windowAdded.connect(hook);
@@ -309,21 +334,10 @@ pub async fn activate_path_of_exile(connection: &zbus::Connection) -> zbus::Resu
     let id = ACTIVATE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let plugin_name = format!("apt-kwin-overlay-activate-{id}");
 
-    // Mirrors is_path_of_exile()'s matching -- keep in sync.
     let script = format!(
-        "var configuredTitle = {};\n{}",
-        serde_json::Value::String(configured_title()),
-        r#"
-var candidates = workspace.windowList().filter(function (w) {
-    var className = (w.resourceClass || "").toLowerCase();
-    var caption = (w.caption || "").trim().toLowerCase();
-    return className.indexOf("pathofexile") !== -1 || caption === "path of exile" || caption === "path of exile 2"
-        || (configuredTitle !== "" && caption === configuredTitle);
-});
-if (candidates.length > 0) {
-    workspace.activeWindow = candidates[0];
-}
-"#
+        "{}var candidates = workspace.windowList().filter(isPoe);\n\
+         if (candidates.length > 0) workspace.activeWindow = candidates[0];\n",
+        poe_matcher_js()
     );
 
     let result = crate::with_timeout(SCRIPT_TIMEOUT, run_script(connection, &plugin_name, &script))
@@ -347,6 +361,13 @@ mod tests {
             width: 0.0,
             height: 0.0,
         }
+    }
+
+    #[test]
+    fn poe_matcher_js_embeds_the_shared_rule() {
+        let js = poe_matcher_js();
+        assert!(js.contains(r#""pathofexile""#));
+        assert!(js.contains(r#"["path of exile","path of exile 2"]"#));
     }
 
     #[test]

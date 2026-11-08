@@ -116,6 +116,10 @@ tabs — those are replaced with a banner pointing here, since KDE's
 already-granted key the way Electron's global-shortcut API did (see
 `host_config.rs`'s doc comments for the empirical detail).
 
+For troubleshooting, `APT_KWIN_OVERLAY_DEBUG=1 cargo run --release` also
+prints per-event detail to the terminal (window activations, hotkey
+dispatch, popup tracking).
+
 ## License
 
 MIT, see [LICENSE](LICENSE). The vendored `awakened-poe-trade` submodule

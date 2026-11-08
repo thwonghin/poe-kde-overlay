@@ -225,7 +225,7 @@ impl RemoteInput {
                     // Not modifier changes: those fire on every Ctrl/Alt/Shift
                     // press anywhere on the desktop.
                     if !matches!(event, EiEvent::KeyboardModifiers(_)) {
-                        println!("[remote_input] eis event: {event:?}");
+                        debug!("[remote_input] eis event: {event:?}");
                     }
                     match event {
                         EiEvent::SeatAdded(added) => {
@@ -565,10 +565,8 @@ impl RemoteInput {
     /// user is often still physically holding the shortcut (e.g. the `D` of
     /// Ctrl+D) when we inject Ctrl+C, and PoE then sees Ctrl+D+C and
     /// sometimes ignores it (observed live as "clipboard poll timed out").
-    /// ponytail: uses the renderer's configured `shortcut`; if the user
-    /// rebound the hotkey in KDE System Settings these may be the wrong keys
-    /// (stray key-ups are harmless). Upgrade path: track the portal's
-    /// bound `trigger_description` instead.
+    /// `shortcut` is what KDE actually has bound when that could be parsed
+    /// (shortcuts.rs's `Bindings::hotkey`); stray key-ups are harmless.
     /// With `keep_mod_keys` only the non-modifier key is released, matching
     /// Shortcuts.ts.
     fn release_shortcut_keys(&self, shortcut: &str, keep_mod_keys: bool) {

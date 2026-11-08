@@ -52,6 +52,9 @@ pub fn handle(
     let agent = AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // Bounds how long a hung upstream holds this connection's
+            // thread (and the renderer's request).
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
             .build()
             .into()
     });
@@ -61,18 +64,19 @@ pub fn handle(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
 
-    let result = if method == "POST" {
-        let mut builder = agent.post(&url).header("user-agent", OUTBOUND_USER_AGENT);
-        for (key, value) in &forwarded_headers {
-            builder = builder.header(*key, *value);
-        }
-        builder.send(body)
+    // Method passed through like proxy.ts's `method: req.method`; a body
+    // is only sent when the client sent one.
+    let mut request = ureq::http::Request::builder()
+        .method(method)
+        .uri(&url)
+        .header("user-agent", OUTBOUND_USER_AGENT);
+    for (key, value) in &forwarded_headers {
+        request = request.header(*key, *value);
+    }
+    let result = if body.is_empty() {
+        request.body(()).map_err(ureq::Error::from).and_then(|r| agent.run(r))
     } else {
-        let mut builder = agent.get(&url).header("user-agent", OUTBOUND_USER_AGENT);
-        for (key, value) in &forwarded_headers {
-            builder = builder.header(*key, *value);
-        }
-        builder.call()
+        request.body(body).map_err(ureq::Error::from).and_then(|r| agent.run(r))
     };
 
     match result {

@@ -13,26 +13,52 @@ use gtk4_layer_shell::LayerShell;
 use serde_json::json;
 
 use crate::host_config::{
-    ActionKind, ParsedHostConfig, ShortcutAction, default_actions, extra_registerable_actions,
+    ActionKind, ShortcutAction, default_actions, extra_registerable_actions,
     shortcut_id,
 };
 use crate::remote_input::{MOD_ALT, MOD_CTRL, RemoteInput};
 use crate::{Overlay, with_timeout};
 
-pub fn spawn(overlay: Rc<Overlay>, host_config_rx: async_channel::Receiver<ParsedHostConfig>) {
+pub fn spawn(overlay: Rc<Overlay>, shortcuts_rx: async_channel::Receiver<Vec<ShortcutAction>>) {
     glib::spawn_future_local(async move {
-        if let Err(err) = run(&overlay, host_config_rx).await {
+        if let Err(err) = run(&overlay, shortcuts_rx).await {
             overlay.logger.error(&format!("[shortcuts] error: {err}"));
         }
     });
 }
 
-/// Every NewShortcut we've ever wanted bound (keyed by id, never shrinks)
-/// plus the current id → action dispatch map.
+/// Every NewShortcut we've ever wanted bound (keyed by id, never shrinks),
+/// the current id → action dispatch map, and the trigger KDE actually has
+/// bound per id (renderer format, see `host_config::trigger_to_shortcut`).
 #[derive(Default)]
 struct Bindings {
     all_shortcuts: HashMap<String, NewShortcut>,
     dispatch: HashMap<String, ShortcutAction>,
+    triggers: HashMap<String, String>,
+}
+
+impl Bindings {
+    fn record_triggers(&mut self, shortcuts: &[ashpd::desktop::global_shortcuts::Shortcut]) {
+        for s in shortcuts {
+            let parsed = crate::host_config::trigger_to_shortcut(s.trigger_description());
+            println!(
+                "[shortcuts] {} is bound to {:?} (parsed {parsed:?})",
+                s.id(),
+                s.trigger_description()
+            );
+            match parsed {
+                Some(trigger) => self.triggers.insert(s.id().to_string(), trigger),
+                None => self.triggers.remove(s.id()),
+            };
+        }
+    }
+
+    /// The keys to release before injecting input for `id`: what KDE has
+    /// bound if we could parse it, else the renderer's configured shortcut
+    /// (only right if the user never rebound it in KDE).
+    fn hotkey(&self, id: &str, action: &ShortcutAction) -> String {
+        self.triggers.get(id).cloned().unwrap_or_else(|| action.shortcut.clone())
+    }
 }
 
 fn shortcut_description(action: &ActionKind) -> String {
@@ -100,9 +126,7 @@ async fn apply_shortcuts(
         let request = proxy
             .bind_shortcuts(session, &full_list, window_id, BindShortcutsOptions::default())
             .await?;
-        for s in request.response()?.shortcuts() {
-            println!("[shortcuts] bound {} -> {}", s.id(), s.trigger_description());
-        }
+        bindings.borrow_mut().record_triggers(request.response()?.shortcuts());
     }
 
     bindings.borrow_mut().dispatch = fresh_dispatch;
@@ -111,7 +135,7 @@ async fn apply_shortcuts(
 
 async fn run(
     overlay: &Rc<Overlay>,
-    host_config_rx: async_channel::Receiver<ParsedHostConfig>,
+    shortcuts_rx: async_channel::Receiver<Vec<ShortcutAction>>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy
@@ -130,16 +154,27 @@ async fn run(
 
     let mut activated = proxy.receive_activated().await?;
 
+    // The user rebinding a hotkey in KDE System Settings.
+    {
+        let bindings = bindings.clone();
+        let changes = proxy.receive_shortcuts_changed().await?;
+        glib::spawn_future_local(async move {
+            let mut changes = std::pin::pin!(changes);
+            while let Some(change) = changes.next().await {
+                bindings.borrow_mut().record_triggers(change.shortcuts());
+            }
+        });
+    }
+
     // Live-updates the same session's bindings whenever the renderer sends
     // CLIENT->MAIN::update-host-config.
     {
         let bindings = bindings.clone();
         let overlay = overlay.clone();
         glib::spawn_future_local(async move {
-            while let Ok(config) = host_config_rx.recv().await {
-                overlay.restore_clipboard.set(config.restore_clipboard);
+            while let Ok(shortcuts) = shortcuts_rx.recv().await {
                 let result =
-                    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, config.shortcuts).await;
+                    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, shortcuts).await;
                 if let Err(err) = result {
                     overlay
                         .logger
@@ -163,18 +198,23 @@ async fn run(
             .get(id)
             .is_some_and(|t| now.duration_since(*t) < DEBOUNCE)
         {
-            println!("[shortcuts] Activated id={id} dropped by debounce");
+            debug!("[shortcuts] Activated id={id} dropped by debounce");
             continue;
         }
         last_activation.insert(id.to_string(), now);
 
-        let Some(action) = bindings.borrow().dispatch.get(id).cloned() else {
-            println!("[shortcuts] Activated id={id} has no dispatch entry");
+        let Some((action, hotkey)) = bindings
+            .borrow()
+            .dispatch
+            .get(id)
+            .map(|action| (action.clone(), bindings.borrow().hotkey(id, action)))
+        else {
+            debug!("[shortcuts] Activated id={id} has no dispatch entry");
             continue;
         };
         match action.action {
             ActionKind::ToggleOverlay => {
-                println!(
+                debug!(
                     "[shortcuts] toggle-overlay activated, click_through was {}",
                     overlay.click_through.get()
                 );
@@ -182,7 +222,7 @@ async fn run(
                 // activating over another app is a no-op there. Deactivating
                 // stays unconditional so the overlay can't get stuck active.
                 if overlay.click_through.get() && !overlay.poe_active() {
-                    println!("[shortcuts] toggle-overlay ignored: active window is not Path of Exile");
+                    debug!("[shortcuts] toggle-overlay ignored: active window is not Path of Exile");
                 } else {
                     // Shortcuts.ts: areaTracker.removeListeners() first.
                     overlay.auto_close_gen.set(overlay.auto_close_gen.get() + 1);
@@ -192,7 +232,7 @@ async fn run(
             ActionKind::CopyItem {
                 ref target,
                 focus_overlay,
-            } => price_check(overlay, target, focus_overlay, &action.shortcut, action.keep_mod_keys).await,
+            } => price_check(overlay, target, focus_overlay, &hotkey, action.keep_mod_keys).await,
             ActionKind::TriggerEvent { target } => overlay
                 .events
                 .broadcast("MAIN->CLIENT::widget-action", json!({ "target": target })),
@@ -200,7 +240,7 @@ async fn run(
                 // Real APT has every hotkey unregistered while the overlay
                 // is interactive; typing into PoE then would be surprising.
                 if overlay.click_through.get() {
-                    paste_action(overlay, &action.action, &action.shortcut).await
+                    paste_action(overlay, &action.action, &hotkey).await
                 }
             }
             ActionKind::Unsupported => {}
@@ -252,7 +292,7 @@ async fn price_check(
     shortcut: &str,
     keep_mod_keys: bool,
 ) {
-    println!(
+    debug!(
         "[shortcuts] price_check called, target={target}, focus_overlay={focus_overlay}, price_check_open={}",
         overlay.price_check_open.get()
     );
@@ -273,7 +313,7 @@ async fn price_check(
     // forward it to the game, or it would Ctrl+C whatever is selected in
     // e.g. a browser.
     if !overlay.poe_active() {
-        println!("[shortcuts] price-check ignored: active window is not Path of Exile");
+        debug!("[shortcuts] price-check ignored: active window is not Path of Exile");
         return;
     }
 
@@ -324,7 +364,7 @@ async fn price_check(
     let (cursor, copied) = match with_timeout(Duration::from_secs(2), work).await {
         Some(Some(result)) => result,
         Some(None) => {
-            println!("[shortcuts] price-check skipped: focus left Path of Exile before Ctrl+C");
+            debug!("[shortcuts] price-check skipped: focus left Path of Exile before Ctrl+C");
             return;
         }
         None => {
@@ -339,7 +379,7 @@ async fn price_check(
     let clipboard = match copied {
         Ok(Some(text)) => text,
         Ok(None) => {
-            println!("[shortcuts] price-check clipboard: empty");
+            debug!("[shortcuts] price-check clipboard: empty");
             return;
         }
         Err(err) => {
@@ -349,7 +389,7 @@ async fn price_check(
             return;
         }
     };
-    println!(
+    debug!(
         "[shortcuts] price-check clipboard read ({} chars) in {}ms, sending item-text at ({x}, {y})",
         clipboard.len(),
         started.elapsed().as_millis()
@@ -459,20 +499,20 @@ fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
             if overlay.click_through.get() && !holding {
                 let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
                 if distance > CLOSE_THRESHOLD {
-                    println!("[shortcuts] auto-close: cursor moved {distance:.0}px");
+                    debug!("[shortcuts] auto-close: cursor moved {distance:.0}px");
                     overlay.hide_price_check();
                     return;
                 }
             } else if inside {
                 if overlay.click_through.get() {
-                    println!("[shortcuts] popup tracker: cursor entered popup, activating overlay");
+                    debug!("[shortcuts] popup tracker: cursor entered popup, activating overlay");
                     overlay.set_click_through(false);
                     // Same state as a locked popup: the overlay owns input,
                     // so the next hotkey press closes instead of copying.
                     overlay.price_check_locked.set(true);
                 }
             } else if !overlay.click_through.get() {
-                println!("[shortcuts] popup tracker: cursor left popup, returning to game");
+                debug!("[shortcuts] popup tracker: cursor left popup, returning to game");
                 overlay.close_all_ui().await;
                 return;
             }

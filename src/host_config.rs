@@ -220,6 +220,55 @@ pub fn to_portal_trigger(shortcut: &str) -> String {
         .join("+")
 }
 
+/// The portal's `trigger_description` for a bound shortcut (KDE renders it
+/// like a QKeySequence: "Ctrl+Alt+D", "Shift+Space", "Ctrl+Return") back in
+/// the renderer's "Ctrl + Alt + D" format, so the keys actually bound in KDE
+/// can be released before injecting input. `None` for anything we can't
+/// map (unset, Meta, a localized modifier name, …) — callers then fall back
+/// to the renderer's configured shortcut. Only the first sequence of a
+/// multi-binding ("Ctrl+D, Ctrl+E") is used.
+pub fn trigger_to_shortcut(description: &str) -> Option<String> {
+    let sequence = description.split(", ").next()?.trim();
+    let (modifiers, key) = sequence.rsplit_once('+').unwrap_or(("", sequence));
+    let mut parts: Vec<&str> = Vec::new();
+    for modifier in modifiers.split('+').filter(|m| !m.is_empty()) {
+        parts.push(match modifier {
+            "Ctrl" | "Control" => "Ctrl",
+            "Alt" => "Alt",
+            "Shift" => "Shift",
+            _ => return None,
+        });
+    }
+    let key = match key {
+        "Return" => "Enter",
+        "Esc" => "Escape",
+        "Ins" => "Insert",
+        "Del" => "Delete",
+        "PgUp" => "PageUp",
+        "PgDown" => "PageDown",
+        "Left" => "ArrowLeft",
+        "Up" => "ArrowUp",
+        "Right" => "ArrowRight",
+        "Down" => "ArrowDown",
+        ";" => "Semicolon",
+        "=" => "Equal",
+        "," => "Comma",
+        "-" => "Minus",
+        "." => "Period",
+        "/" => "Slash",
+        "`" => "Backquote",
+        "[" => "BracketLeft",
+        "\\" => "Backslash",
+        "]" => "BracketRight",
+        "'" => "Quote",
+        other => other,
+    };
+    // Validates the key against the same vocabulary the rest of the app uses.
+    key_to_evdev(key)?;
+    parts.push(key);
+    Some(parts.join(" + "))
+}
+
 pub struct ParsedHostConfig {
     pub shortcuts: Vec<ShortcutAction>,
     pub restore_clipboard: bool,
@@ -381,6 +430,26 @@ mod tests {
         assert_eq!(to_portal_trigger("Ctrl + ArrowUp"), "CTRL+Up");
         assert_eq!(to_portal_trigger("Ctrl + F5"), "CTRL+F5");
         assert_eq!(to_portal_trigger("Ctrl + Delete"), "CTRL+Delete");
+    }
+
+    #[test]
+    fn trigger_to_shortcut_parses_kde_trigger_descriptions() {
+        assert_eq!(trigger_to_shortcut("Ctrl+D").as_deref(), Some("Ctrl + D"));
+        assert_eq!(trigger_to_shortcut("Ctrl+Alt+D").as_deref(), Some("Ctrl + Alt + D"));
+        assert_eq!(trigger_to_shortcut("Shift+Space").as_deref(), Some("Shift + Space"));
+        assert_eq!(trigger_to_shortcut("Ctrl+Return").as_deref(), Some("Ctrl + Enter"));
+        assert_eq!(trigger_to_shortcut("Ctrl+;").as_deref(), Some("Ctrl + Semicolon"));
+        assert_eq!(trigger_to_shortcut("F5").as_deref(), Some("F5"));
+        assert_eq!(trigger_to_shortcut("Ctrl+D, Ctrl+E").as_deref(), Some("Ctrl + D"));
+        assert_eq!(trigger_to_shortcut(""), None);
+        assert_eq!(trigger_to_shortcut("Meta+D"), None);
+        assert_eq!(trigger_to_shortcut("Strg+D"), None);
+        assert_eq!(trigger_to_shortcut("Ctrl++"), None);
+        // Round-trips the renderer format the portal is given.
+        for s in ["Ctrl + D", "Ctrl + Alt + D", "Shift + Space"] {
+            let kde = s.replace(" + ", "+");
+            assert_eq!(trigger_to_shortcut(&kde).as_deref(), Some(s));
+        }
     }
 
     #[test]

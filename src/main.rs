@@ -1,3 +1,19 @@
+/// `println!` only when `APT_KWIN_OVERLAY_DEBUG` is set: per-event chatter
+/// (window activations, hotkey dispatch, popup tracking). Lifecycle
+/// messages and errors stay on unconditionally.
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        if $crate::debug_enabled() {
+            println!($($arg)*);
+        }
+    };
+}
+
+pub(crate) fn debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("APT_KWIN_OVERLAY_DEBUG").is_some())
+}
+
 mod config_store;
 mod host_config;
 mod kwin_tracker;
@@ -247,7 +263,7 @@ impl Overlay {
     /// always-available safety hatch regardless of what's currently showing.
     /// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
     pub async fn close_all_ui(&self) {
-        println!(
+        debug!(
             "[main] close_all_ui: price_check_open={}, price_check_locked={}, click_through was {}",
             self.price_check_open.get(),
             self.price_check_locked.get(),
@@ -459,6 +475,22 @@ fn build_ui(app: &Application) {
         });
     }
 
+    // CLIENT->MAIN::update-host-config: restoreClipboard applies right away;
+    // the shortcut list goes on to shortcuts.rs, which only reads it once
+    // its GlobalShortcuts session is up (if that never happens, the
+    // stash-search widget still gets the right restoreClipboard).
+    let (shortcuts_tx, shortcuts_rx) = async_channel::unbounded();
+    {
+        let overlay = overlay.clone();
+        let host_config_rx = backend.host_config_rx.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(config) = host_config_rx.recv().await {
+                overlay.restore_clipboard.set(config.restore_clipboard);
+                let _ = shortcuts_tx.send(config.shortcuts).await;
+            }
+        });
+    }
+
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
     let conn_rx = kwin_tracker::spawn(sender);
     {
@@ -472,7 +504,8 @@ fn build_ui(app: &Application) {
 
     {
         let overlay = overlay.clone();
-        let mut attached = false;
+        // PoE pid the overlay last attached to (`overlay-attached` sent).
+        let mut attached_pid = None;
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
@@ -487,18 +520,17 @@ fn build_ui(app: &Application) {
                             continue;
                         }
                         if w.is_path_of_exile() {
-                            println!(
+                            debug!(
                                 "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
                                 w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                             );
                             move_overlay_to_window_monitor(&overlay, &w);
-                            // Real APT sends this when electron-overlay-window
-                            // first attaches to PoE; drives the renderer's
-                            // "overlay ready" toast (LoadingAnimation.vue).
-                            // ponytail: once per process — PoE restarts
-                            // aren't detected, so no re-toast on relaunch.
-                            if !attached {
-                                attached = true;
+                            // Real APT sends this whenever electron-overlay-window
+                            // attaches to a PoE window; drives the renderer's
+                            // "overlay ready" toast (LoadingAnimation.vue). A
+                            // new pid means the game was restarted.
+                            if attached_pid != Some(w.pid) {
+                                attached_pid = Some(w.pid);
                                 overlay
                                     .events
                                     .broadcast("MAIN->OVERLAY::overlay-attached", serde_json::Value::Null);
@@ -510,19 +542,22 @@ fn build_ui(app: &Application) {
                                 overlay.close_all_ui().await;
                             }
                         } else {
-                            println!(
+                            debug!(
                                 "[kwin_tracker] activated (not PoE): class={:?} caption={:?} pid={}",
                                 w.class_name, w.caption, w.pid
                             );
                         }
                         overlay.active_window.replace(Some(w));
                     }
-                    TrackerEvent::GeometryChanged(w) => {
+                    TrackerEvent::OutputChanged(w) => {
+                        // Follow PoE to another monitor without waiting for
+                        // it to be re-activated.
                         if w.is_path_of_exile() {
-                            println!(
-                                "[kwin_tracker] geometry: class={:?} caption={:?} {}x{} @ ({}, {})",
-                                w.class_name, w.caption, w.width, w.height, w.x, w.y
+                            debug!(
+                                "[kwin_tracker] PoE moved output: {}x{} @ ({}, {})",
+                                w.width, w.height, w.x, w.y
                             );
+                            move_overlay_to_window_monitor(&overlay, &w);
                         }
                     }
                 }
@@ -552,7 +587,6 @@ fn build_ui(app: &Application) {
     }
 
     {
-        let host_config_rx = backend.host_config_rx.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
@@ -576,7 +610,7 @@ fn build_ui(app: &Application) {
                 Err(err) => overlay.logger.error(&format!("[main] remote_input setup failed: {err}")),
             }
 
-            shortcuts::spawn(overlay, host_config_rx);
+            shortcuts::spawn(overlay, shortcuts_rx);
         });
     }
 }
@@ -634,7 +668,7 @@ fn move_overlay_to_window_monitor(overlay: &Rc<Overlay>, target: &kwin_tracker::
         );
         if center_x >= mx && center_x < mx + mw && center_y >= my && center_y < my + mh {
             if window.monitor().as_ref() != Some(&monitor) {
-                println!("[main] moving overlay to PoE's monitor");
+                debug!("[main] moving overlay to PoE's monitor");
                 window.set_monitor(Some(&monitor));
 
                 let overlay = overlay.clone();
