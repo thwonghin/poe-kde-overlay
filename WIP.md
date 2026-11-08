@@ -19,7 +19,10 @@ and the price-check popup tracker's hold-to-pin / hover-to-interact plus
 `keepModKeys` (`spawn_auto_close` in `shortcuts.rs`), and the
 paste-in-chat / stash-search hotkeys plus the stash-search widget's
 `user-action` click (`chat_sequence`/`paste_with_taps` in `remote_input.rs`),
-and a single-instance guard (`build_ui` in `main.rs`) —
+a single-instance guard (`build_ui` in `main.rs`), and the proxy's missing
+cookie jar (deliberately left as-is: the renderer has no cookie
+dependency; if price checks ever start getting Cloudflare challenges /
+403s, give `proxy.rs`'s `ureq::Agent` a cookie jar) —
 have been removed from this list to keep it focused on what's actually
 still open. See git history for how each landed; the reasoning behind
 non-obvious decisions (e.g. why hotkeys are now configured in KDE System
@@ -66,32 +69,9 @@ keydown/keyup events.
   "advanced item description" keybind) — as of PoE 3.29, `Shortcuts.ts`
   hardcodes `showModsKey = 'Ctrl'` and ignores whatever `GameConfig` found
   anyway. Close to dead code in the real app too now; not worth porting.
-## 7. Small difference: proxy cookies
-
-Not urgent; noting it so it doesn't get re-discovered from scratch later.
-
-- **Proxy doesn't forward `Set-Cookie` / has no outbound cookie jar.** Real
-  `proxy.ts` uses Electron's `net.request` with `useSessionCookies: true` —
-  the app's persistent session cookie jar is attached to outbound requests
-  to `pathofexile.com`/etc. and updated from responses automatically,
-  and `proxy.ts` additionally strips the `Partitioned` attribute from
-  `Set-Cookie` response headers so Chromium's cookie store will actually
-  accept cross-context Cloudflare cookies. Our `proxy.rs` forwards only
-  `content-type` and `x-rate-limit-*` response headers
-  (`write_response_with_headers` call in `proxy::handle`) — `Set-Cookie` is
-  silently dropped, and there's no cookie jar on the `ureq::Agent` side to
-  attach anything back on the next request either way. Checked the renderer
-  for any cookie/credential dependency (`grep -rn "POESESSID\|document.cookie\|withCredentials"
-  renderer/src`) and found none, so this likely doesn't affect price-check
-  or trade-search today — but it's a genuine behavioral difference from
-  real APT's proxy, worth remembering if GGG-side requests ever start
-  behaving inconsistently (e.g. increasingly aggressive Cloudflare
-  challenges from what looks like a cookie-less client on every request).
-
 ## Suggested order if picked back up
 
 1. §4 (`logKeys`) — low value with only modifier transitions to log.
-2. §7 — proxy cookies have no confirmed symptom; pick up opportunistically.
 
 (§1, stash scroll-wheel navigation, is deliberately left off this list —
 needs real window-bounds tracking plus scroll-event capture we don't have
@@ -121,6 +101,4 @@ the real APT icon already vendored at `renderer/dist/icon.png`) — needed
 for `ashpd::register_host_app` to succeed on KDE, which looks up an
 installed app matching `APP_ID` via the portal's Registry interface.
 
-**Remaining**: nothing structural. One small, low-priority item — see §7
-above (proxy doesn't forward `Set-Cookie`/has no outbound cookie jar). No
-confirmed real-world symptom.
+**Remaining**: nothing.
