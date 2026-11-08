@@ -106,7 +106,7 @@ pub struct RemoteInput {
     // price-check popup is interactive) — attempting a SelectionRead for a
     // mime type the current owner doesn't offer is what triggers the
     // xdg-desktop-portal-kde bug read_clipboard_once_bounded's doc comment
-    // describes. Checking this first lets read_clipboard_text skip the read
+    // describes. Checking this first lets copy_item_text skip the read
     // entirely while we already know it would hit that bug, rather than
     // relying solely on the per-read timeout as a safety net. Starts `true`
     // (optimistic) since there's no way to query current state up front,
@@ -273,7 +273,7 @@ impl RemoteInput {
 
         // See `clipboard_offers_text`'s doc comment: tracks whether the
         // current clipboard owner offers CLIPBOARD_TEXT_MIME, so
-        // read_clipboard_text can skip a doomed SelectionRead instead of
+        // copy_item_text can skip a doomed SelectionRead instead of
         // hitting the portal's hang-on-not-offered-format bug. Own
         // Clipboard handle for the same reason as the transfer listener
         // above (independent long-lived signal subscription).
@@ -345,7 +345,7 @@ impl RemoteInput {
     /// service "": Marshalling failed: Invalid file descriptor passed in
     /// arguments` -- its own error-reply path is broken and never sends any
     /// D-Bus reply back (success or failure), so an unbounded await on
-    /// `read_clipboard_once` hangs forever. Since `read_clipboard_text` is
+    /// `read_clipboard_once` hangs forever. Since `copy_item_text` is
     /// awaited inline in shortcuts.rs's hotkey-dispatch loop, a single hang
     /// here would silently wedge every future hotkey press until the
     /// process is restarted, not just fail one price-check.
@@ -402,7 +402,15 @@ impl RemoteInput {
     /// that's specifically about Electron's clipboard API being vetoed by
     /// Klipper; revisit only if writing an empty string here turns out not
     /// to actually clear it in testing.
-    pub async fn read_clipboard_text(&self, restore: bool) -> ashpd::Result<Option<String>> {
+    pub async fn copy_item_text(&self, restore: bool) -> ashpd::Result<Option<String>> {
+        // Press *before* the snapshot/clear, unlike real HostClipboard.ts.
+        // Tried the upstream order (snapshot first) live: the pre-read then
+        // hits whatever owned the clipboard before (often not offering text)
+        // and trips the portal's not-offered-format hang (see
+        // read_clipboard_once_bounded), wedging later calls. Pressing first
+        // means PoE already owns the selection by the time we read.
+        self.press_ctrl_c();
+
         let previous = match self.read_clipboard_if_offered().await {
             Ok(text) => text,
             Err(err) => {

@@ -409,6 +409,12 @@ fn build_ui(app: &Application) {
                                 .await;
                             }
                         }
+                        if !w.is_path_of_exile() {
+                            println!(
+                                "[kwin_tracker] activated (not PoE): class={:?} caption={:?} pid={}",
+                                w.class_name, w.caption, w.pid
+                            );
+                        }
                         active_window.replace(Some(w));
                     }
                     TrackerEvent::GeometryChanged(w) => {

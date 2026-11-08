@@ -22,6 +22,16 @@ fn configured_title() -> String {
     WINDOW_TITLE.read().unwrap().clone()
 }
 
+fn is_path_of_exile(class_name: &str, caption: &str) -> bool {
+    let class = class_name.to_ascii_lowercase();
+    let caption = caption.trim().to_ascii_lowercase();
+    let title = configured_title();
+    class.contains("pathofexile")
+        || caption == "path of exile"
+        || caption == "path of exile 2"
+        || (!title.is_empty() && caption == title)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowEvent {
     // Not read yet — kept for later matching a specific tracked window
@@ -46,13 +56,7 @@ impl WindowEvent {
     /// Helium" contains the substring too, and matching loosely made the
     /// overlay follow the browser around instead of the game.
     pub fn is_path_of_exile(&self) -> bool {
-        let class = self.class_name.to_ascii_lowercase();
-        let caption = self.caption.trim().to_ascii_lowercase();
-        let title = configured_title();
-        class.contains("pathofexile")
-            || caption == "path of exile"
-            || caption == "path of exile 2"
-            || (!title.is_empty() && caption == title)
+        is_path_of_exile(&self.class_name, &self.caption)
     }
 
     /// True when this activation event is our own overlay surface, not some
@@ -209,10 +213,18 @@ async fn run(
 struct CursorPos {
     x: f64,
     y: f64,
+    #[serde(rename = "className")]
+    class_name: String,
+    caption: String,
 }
 
+/// `(x, y, poe_is_active)` — the active-window check rides along on the
+/// same KWin round trip so price-check can verify focus right before
+/// injecting Ctrl+C, instead of trusting the async tracker's cached
+/// activation (which can lag a fast Alt+Tab and send Ctrl+C into e.g. a
+/// terminal).
 struct CursorPosCallback {
-    sender: async_channel::Sender<(f64, f64)>,
+    sender: async_channel::Sender<(f64, f64, bool)>,
 }
 
 #[interface(name = "io.github.thwonghin.AptKwinOverlay.CursorPosCallback")]
@@ -220,7 +232,8 @@ impl CursorPosCallback {
     async fn cursor_pos(&self, json: String) {
         match serde_json::from_str::<CursorPos>(&json) {
             Ok(pos) => {
-                let _ = self.sender.send((pos.x, pos.y)).await;
+                let poe = is_path_of_exile(&pos.class_name, &pos.caption);
+                let _ = self.sender.send((pos.x, pos.y, poe)).await;
             }
             Err(err) => eprintln!("[kwin_tracker] bad cursor pos payload: {err}"),
         }
@@ -232,7 +245,7 @@ impl CursorPosCallback {
 /// tiny disposable script instead of a persistent one. Each call uses a
 /// fresh path + plugin name so it can't collide with the resident tracker
 /// script or with an overlapping call.
-pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f64, f64)> {
+pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f64, f64, bool)> {
     static QUERY_COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = QUERY_COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = format!("/query{id}");
@@ -246,7 +259,7 @@ pub async fn query_cursor_pos(connection: &zbus::Connection) -> zbus::Result<(f6
 
     let dbus_addr = connection.unique_name().expect("connection has a unique name").to_string();
     let script = format!(
-        r#"callDBus("{dbus_addr}", "{path}", "{iface}", "CursorPos", JSON.stringify({{x: workspace.cursorPos.x, y: workspace.cursorPos.y}}));"#,
+        r#"var w = workspace.activeWindow; callDBus("{dbus_addr}", "{path}", "{iface}", "CursorPos", JSON.stringify({{x: workspace.cursorPos.x, y: workspace.cursorPos.y, className: w ? (w.resourceClass || "") : "", caption: w ? (w.caption || "") : ""}}));"#,
         dbus_addr = dbus_addr,
         path = path,
         iface = CURSOR_QUERY_IFACE,

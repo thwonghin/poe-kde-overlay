@@ -356,6 +356,10 @@ async fn run(
     Ok(())
 }
 
+thread_local! {
+    static AUTO_CLOSE_GEN: Cell<u64> = const { Cell::new(0) };
+}
+
 /// Handles any `copy-item` action: presses Ctrl+C, reads the clipboard, and
 /// broadcasts item-text with whatever `target` the bound action specifies
 /// (real APT's own copy-item targets aren't just "price-check" — open-wiki,
@@ -380,22 +384,22 @@ async fn price_check(
         "[shortcuts] price_check called, target={target}, focus_overlay={focus_overlay}, price_check_open={}",
         price_check_open.get()
     );
-    // Pressing the same hotkey again while the popup's open closes it --
-    // hide-exclusive-widget targets exactly this widget (unlike
-    // focus-change, which affects every hide-on-blur/hide-on-focus widget).
-    if price_check_open.get() {
+    // Locked popup open: the overlay holds keyboard focus, so an injected
+    // Ctrl+C would land in our own WebView, not the game — pressing again
+    // just closes it and hands control back (real APT has shortcuts
+    // unregistered entirely while the overlay is active). An *unlocked*
+    // popup falls through to a fresh check like real Shortcuts.ts, which
+    // re-reads on every press; toggling it closed here used to swallow
+    // every second press (e.g. hovering a second item while the first
+    // popup was still up).
+    if price_check_open.get() && price_check_locked.get() {
         events.broadcast(
             "MAIN->OVERLAY::hide-exclusive-widget",
             serde_json::Value::Null,
         );
         price_check_open.set(false);
-        if price_check_locked.get() {
-            // Opening the locked popup switched click-through off so it
-            // could be interacted with; closing it should give control of
-            // the game back rather than leaving the user stuck interactive.
-            set_click_through(true, window, click_through, events);
-            price_check_locked.set(false);
-        }
+        set_click_through(true, window, click_through, events);
+        price_check_locked.set(false);
         return;
     }
 
@@ -412,7 +416,20 @@ async fn price_check(
         return;
     }
 
-    let cursor = {
+    let started = std::time::Instant::now();
+    let remote_ref = remote_input.borrow();
+    let Some(remote) = remote_ref.as_ref() else {
+        let msg = "[shortcuts] price-check: remote input not ready yet";
+        eprintln!("{msg}");
+        logger.write(msg);
+        return;
+    };
+
+    // Cursor lookup (a KWin-scripting round trip) also reports the window
+    // that's active *right now*; Ctrl+C is only sent once that confirms PoE.
+    // Running it in parallel with the copy was faster but let Ctrl+C land
+    // in whatever window had just taken focus (confirmed live: a terminal).
+    let cursor_query = async {
         let connection = kwin_connection.borrow().clone();
         match connection {
             Some(connection) => match crate::kwin_tracker::query_cursor_pos(&connection).await {
@@ -432,29 +449,43 @@ async fn price_check(
             }
         }
     };
-    let (x, y) = cursor.unwrap_or((0.0, 0.0));
 
-    let remote_ref = remote_input.borrow();
-    let Some(remote) = remote_ref.as_ref() else {
-        let msg = "[shortcuts] price-check: remote input not ready yet";
-        eprintln!("{msg}");
-        logger.write(msg);
-        return;
-    };
-
-    remote.press_ctrl_c();
-
-    // Injected keys go out over the EIS socket fire-and-forget — press_ctrl_c
-    // returning just means the events were queued/flushed, not that the
-    // target app has processed Ctrl+C and updated its clipboard yet.
-    // read_clipboard_text itself now polls (48ms steps, up to ~500ms) rather
-    // than assuming a single fixed wait is always enough, so there's no
-    // separate delay needed here before calling it.
+    // copy_item_text presses Ctrl+C, snapshots + clears the clipboard, then
+    // polls (48ms steps, up to ~500ms) for the game's copy to land. Uses the
+    // portal's clipboard rather than gdk::Clipboard, which only reliably
+    // reflects content while our own window has keyboard focus.
     //
-    // gdk::Clipboard only reliably reflects content while our own window has
-    // had keyboard focus (Wayland gates clipboard visibility by focus) — use
-    // the portal's clipboard instead, which works regardless of local focus.
-    let clipboard = match remote.read_clipboard_text(restore_clipboard.get()).await {
+    // Overall cap: some portal calls in copy_item_text (e.g. the clipboard
+    // clear/restore writes) have no timeout of their own, and this runs
+    // inline in the hotkey loop — one hung call used to freeze every later
+    // hotkey until restart. Confirmed live once after a portal read hang.
+    const PRICE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let work = std::pin::pin!(async {
+        let cursor = cursor_query.await;
+        // Cursor query failed → can't re-verify; fall back to the cached
+        // check above rather than breaking price-check outright.
+        if cursor.is_some_and(|(_, _, poe_active)| !poe_active) {
+            return None;
+        }
+        Some((cursor, remote.copy_item_text(restore_clipboard.get()).await))
+    });
+    let timeout = std::pin::pin!(glib::timeout_future(PRICE_CHECK_TIMEOUT));
+    let (cursor, copied) = match futures_util::future::select(work, timeout).await {
+        futures_util::future::Either::Left((Some(result), _)) => result,
+        futures_util::future::Either::Left((None, _)) => {
+            println!("[shortcuts] price-check skipped: focus left Path of Exile before Ctrl+C");
+            return;
+        }
+        futures_util::future::Either::Right(_) => {
+            let msg = "[shortcuts] price-check timed out (portal or KWin call hung)";
+            eprintln!("{msg}");
+            logger.write(msg);
+            return;
+        }
+    };
+    let (x, y, _) = cursor.unwrap_or((0.0, 0.0, true));
+
+    let clipboard = match copied {
         Ok(Some(text)) => text,
         Ok(None) => {
             println!("[shortcuts] price-check clipboard: empty");
@@ -468,8 +499,9 @@ async fn price_check(
         }
     };
     println!(
-        "[shortcuts] price-check clipboard read ({} chars), sending item-text at ({x}, {y})",
-        clipboard.len()
+        "[shortcuts] price-check clipboard read ({} chars) in {}ms, sending item-text at ({x}, {y})",
+        clipboard.len(),
+        started.elapsed().as_millis()
     );
 
     // `target` is whatever the bound action's config specifies (e.g. the
@@ -543,24 +575,39 @@ fn spawn_auto_close(
     const CLOSE_THRESHOLD: f64 = 80.0;
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
 
+    // Mirrors WidgetAreaTracker's removeListeners() on every new item-text:
+    // a newer check supersedes this loop, or it would close the new popup
+    // as soon as the cursor left the *previous* item's position.
+    let generation = AUTO_CLOSE_GEN.with(|g| {
+        g.set(g.get() + 1);
+        g.get()
+    });
+
     glib::spawn_future_local(async move {
         loop {
             glib::timeout_future(POLL_INTERVAL).await;
 
-            if !price_check_open.get() {
-                return; // closed some other way (e.g. pressing the hotkey again)
+            if !price_check_open.get() || AUTO_CLOSE_GEN.with(Cell::get) != generation {
+                return; // closed some other way, or superseded by a newer check
             }
 
             let connection = kwin_connection.borrow().clone();
             let Some(connection) = connection else {
                 continue;
             };
-            let Ok((x, y)) = crate::kwin_tracker::query_cursor_pos(&connection).await else {
+            let Ok((x, y, _)) = crate::kwin_tracker::query_cursor_pos(&connection).await else {
                 continue;
             };
 
+            // Re-check after the (slow) cursor query: a newer check may have
+            // started while it was in flight, and closing now would hide
+            // *that* popup.
+            if AUTO_CLOSE_GEN.with(Cell::get) != generation {
+                return;
+            }
             let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
             if distance > CLOSE_THRESHOLD {
+                println!("[shortcuts] auto-close: cursor moved {distance:.0}px");
                 events.broadcast(
                     "MAIN->OVERLAY::hide-exclusive-widget",
                     serde_json::Value::Null,
