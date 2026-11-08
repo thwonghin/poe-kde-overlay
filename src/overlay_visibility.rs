@@ -11,13 +11,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use gtk4::glib;
 use serde_json::json;
 
-use crate::server::EventBus;
-
+use crate::Overlay;
 use crate::remote_input::{MOD_ALT as ALT, MOD_CTRL as CTRL, MOD_SHIFT as SHIFT};
 
 fn is_alt_only(depressed: u32) -> bool {
@@ -25,17 +23,15 @@ fn is_alt_only(depressed: u32) -> bool {
 }
 
 pub struct OverlayVisibility {
-    events: Arc<EventBus>,
-    click_through: Rc<Cell<bool>>,
+    overlay: Rc<Overlay>,
     visible: Cell<bool>,
     timer: RefCell<Option<glib::SourceId>>,
 }
 
 impl OverlayVisibility {
-    pub fn new(events: Arc<EventBus>, click_through: Rc<Cell<bool>>) -> Rc<Self> {
+    pub fn new(overlay: Rc<Overlay>) -> Rc<Self> {
         Rc::new(Self {
-            events,
-            click_through,
+            overlay,
             visible: Cell::new(true),
             timer: RefCell::new(None),
         })
@@ -61,7 +57,7 @@ impl OverlayVisibility {
         if !self.visible.get() || self.timer.borrow().is_some() {
             return;
         }
-        let delay = if self.click_through.get() { 275 } else { 85 };
+        let delay = if self.overlay.click_through.get() { 275 } else { 85 };
         let this = self.clone();
         let id = glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
             this.timer.replace(None);
@@ -72,7 +68,8 @@ impl OverlayVisibility {
 
     fn set_visible(&self, visible: bool) {
         self.visible.set(visible);
-        self.events
+        self.overlay
+            .events
             .broadcast("MAIN->OVERLAY::visibility", json!({ "isVisible": visible }));
     }
 }

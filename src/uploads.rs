@@ -14,7 +14,10 @@ pub fn handle(stream: &mut TcpStream, method: &str, path: &str, body: &[u8]) -> 
     let name = path.strip_prefix("/uploads/").unwrap_or("");
 
     if method == "GET" {
-        match std::fs::read(uploads_dir().join(name)) {
+        let Some(file) = crate::server::safe_join(&uploads_dir(), name) else {
+            return write_response(stream, 404, "text/plain", b"not found");
+        };
+        match std::fs::read(file) {
             Ok(bytes) => write_response(stream, 200, "", &bytes),
             Err(_) => write_response(stream, 404, "text/plain", b"not found"),
         }

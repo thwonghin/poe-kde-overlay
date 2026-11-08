@@ -86,12 +86,10 @@ fn filter_valid(actions: Vec<ShortcutAction>, logger: &Arc<Logger>) -> Vec<Short
         .into_iter()
         .filter(|a| {
             if RESERVED.contains(&a.shortcut.as_str()) {
-                let msg = format!(
+                logger.error(&format!(
                     "[host_config] hotkey \"{}\" is reserved by the game, skipping",
                     a.shortcut
-                );
-                eprintln!("{msg}");
-                logger.write(&msg);
+                ));
                 return false;
             }
             true
@@ -104,79 +102,111 @@ fn filter_valid(actions: Vec<ShortcutAction>, logger: &Arc<Logger>) -> Vec<Short
         .collect()
 }
 
-/// Translates the renderer's own shortcut string format ("Ctrl + D",
-/// "Ctrl + Alt + D", "Shift + Space" — title-case words joined by " + ",
-/// built by renderer/src/web/Config.ts's getConfigForHost) into the format
-/// ashpd's GlobalShortcuts portal's `preferred_trigger` actually expects:
-/// uppercase modifier keywords immediately followed by "+", with the base
-/// key lowercased (e.g. "CTRL+ALT+d"). Confirmed empirically against a live
-/// KDE session: feeding the renderer's own spaced/title-case string straight
-/// into `preferred_trigger` silently fails to bind to any physical key
-/// (empty `trigger_description`, no `Activated` ever fires) — this exact
-/// uppercase-modifiers/no-spaces/lowercase-key shape is what actually works.
-/// Translates the renderer's own key names (`ipc/KeyToCode.ts`'s `KeyToCode`
-/// object — a closed, finite vocabulary the hotkey-capture UI can ever
-/// produce: single letters/digits, "Space", and named keys like "Enter",
-/// "ArrowUp", "F5", "Delete", "Semicolon") into XKB keysym names. Confirmed
-/// live: a blanket lowercase (our first attempt) works for single letters
-/// and "space" by coincidence, but silently fails to bind for anything else
-/// — e.g. "Enter" lowercased is "enter", which isn't a real X11 keysym; the
-/// actual keysym for that key is "Return". Named/multi-char keys need exact
-/// XKB spelling; only single printable characters (letters, digits, and the
-/// few punctuation names below) actually use lowercase.
-fn key_to_xkb(key: &str) -> String {
-    match key {
-        "Space" => "space".to_string(),
-        "Enter" => "Return".to_string(),
-        "Escape" => "Escape".to_string(),
-        "Tab" => "Tab".to_string(),
-        "Backspace" => "BackSpace".to_string(),
-        "CapsLock" => "Caps_Lock".to_string(),
-        "PageUp" => "Page_Up".to_string(),
-        "PageDown" => "Page_Down".to_string(),
-        "End" => "End".to_string(),
-        "Home" => "Home".to_string(),
-        "ArrowLeft" => "Left".to_string(),
-        "ArrowUp" => "Up".to_string(),
-        "ArrowRight" => "Right".to_string(),
-        "ArrowDown" => "Down".to_string(),
-        "Insert" => "Insert".to_string(),
-        "Delete" => "Delete".to_string(),
-        "Numpad0" => "KP_0".to_string(),
-        "Numpad1" => "KP_1".to_string(),
-        "Numpad2" => "KP_2".to_string(),
-        "Numpad3" => "KP_3".to_string(),
-        "Numpad4" => "KP_4".to_string(),
-        "Numpad5" => "KP_5".to_string(),
-        "Numpad6" => "KP_6".to_string(),
-        "Numpad7" => "KP_7".to_string(),
-        "Numpad8" => "KP_8".to_string(),
-        "Numpad9" => "KP_9".to_string(),
-        "NumpadMultiply" => "KP_Multiply".to_string(),
-        "NumpadAdd" => "KP_Add".to_string(),
-        "NumpadSubtract" => "KP_Subtract".to_string(),
-        "NumpadDecimal" => "KP_Decimal".to_string(),
-        "NumpadDivide" => "KP_Divide".to_string(),
-        "Semicolon" => "semicolon".to_string(),
-        "Equal" => "equal".to_string(),
-        "Comma" => "comma".to_string(),
-        "Minus" => "minus".to_string(),
-        "Period" => "period".to_string(),
-        "Slash" => "slash".to_string(),
-        "Backquote" => "grave".to_string(),
-        "BracketLeft" => "bracketleft".to_string(),
-        "Backslash" => "backslash".to_string(),
-        "BracketRight" => "bracketright".to_string(),
-        "Quote" => "apostrophe".to_string(),
-        // F1..F24 already match XKB naming as-is.
-        f if f.len() >= 2 && f.starts_with('F') && f[1..].chars().all(|c| c.is_ascii_digit()) => {
-            f.to_string()
-        }
-        // Single letters (A-Z) and digits (0-9): XKB names these lowercase.
-        other => other.to_ascii_lowercase(),
+/// The renderer's named keys (`ipc/KeyToCode.ts`'s closed vocabulary) as
+/// `(name, evdev keycode, XKB keysym name)`. Letters, digits and F-keys are
+/// computed in `key_to_evdev`/`key_to_xkb` instead of listed.
+///
+/// XKB names need exact spelling (confirmed live: a blanket lowercase
+/// "enter" silently fails to bind; the keysym is "Return"). Evdev codes are
+/// linux/input-event-codes.h, what EIS injection takes.
+const NAMED_KEYS: &[(&str, u32, &str)] = &[
+    ("Ctrl", 29, "Control_L"),
+    ("Shift", 42, "Shift_L"),
+    ("Alt", 56, "Alt_L"),
+    ("Space", 57, "space"),
+    ("Enter", 28, "Return"),
+    ("Escape", 1, "Escape"),
+    ("Tab", 15, "Tab"),
+    ("Backspace", 14, "BackSpace"),
+    ("CapsLock", 58, "Caps_Lock"),
+    ("PageUp", 104, "Page_Up"),
+    ("PageDown", 109, "Page_Down"),
+    ("End", 107, "End"),
+    ("Home", 102, "Home"),
+    ("ArrowLeft", 105, "Left"),
+    ("ArrowUp", 103, "Up"),
+    ("ArrowRight", 106, "Right"),
+    ("ArrowDown", 108, "Down"),
+    ("Insert", 110, "Insert"),
+    ("Delete", 111, "Delete"),
+    ("Numpad0", 82, "KP_0"),
+    ("Numpad1", 79, "KP_1"),
+    ("Numpad2", 80, "KP_2"),
+    ("Numpad3", 81, "KP_3"),
+    ("Numpad4", 75, "KP_4"),
+    ("Numpad5", 76, "KP_5"),
+    ("Numpad6", 77, "KP_6"),
+    ("Numpad7", 71, "KP_7"),
+    ("Numpad8", 72, "KP_8"),
+    ("Numpad9", 73, "KP_9"),
+    ("NumpadMultiply", 55, "KP_Multiply"),
+    ("NumpadAdd", 78, "KP_Add"),
+    ("NumpadSubtract", 74, "KP_Subtract"),
+    ("NumpadDecimal", 83, "KP_Decimal"),
+    ("NumpadDivide", 98, "KP_Divide"),
+    ("Semicolon", 39, "semicolon"),
+    ("Equal", 13, "equal"),
+    ("Comma", 51, "comma"),
+    ("Minus", 12, "minus"),
+    ("Period", 52, "period"),
+    ("Slash", 53, "slash"),
+    ("Backquote", 41, "grave"),
+    ("BracketLeft", 26, "bracketleft"),
+    ("Backslash", 43, "backslash"),
+    ("BracketRight", 27, "bracketright"),
+    ("Quote", 40, "apostrophe"),
+];
+
+fn named_key(key: &str) -> Option<&'static (&'static str, u32, &'static str)> {
+    NAMED_KEYS.iter().find(|(name, _, _)| *name == key)
+}
+
+fn function_key_number(key: &str) -> Option<u32> {
+    key.strip_prefix('F').filter(|n| !n.is_empty())?.parse().ok()
+}
+
+/// Renderer key name → evdev keycode.
+pub fn key_to_evdev(key: &str) -> Option<u32> {
+    const LETTERS: &[u32] = &[
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47,
+        17, 45, 21, 44,
+    ];
+    if let Some(&(_, code, _)) = named_key(key) {
+        return Some(code);
+    }
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c @ 'A'..='Z'), None) => Some(LETTERS[(c as u8 - b'A') as usize]),
+        (Some('0'), None) => Some(11),
+        // KEY_1..KEY_9 = 2..10
+        (Some(c @ '1'..='9'), None) => Some((c as u8 - b'1') as u32 + 2),
+        // F1..F10 = 59..68, F11/F12 = 87/88, F13..F24 = 183..194
+        _ => match function_key_number(key)? {
+            n @ 1..=10 => Some(58 + n),
+            11 => Some(87),
+            12 => Some(88),
+            n @ 13..=24 => Some(170 + n),
+            _ => None,
+        },
     }
 }
 
+/// Renderer key name → XKB keysym name.
+fn key_to_xkb(key: &str) -> String {
+    match named_key(key) {
+        Some(&(_, _, xkb)) => xkb.to_string(),
+        // F1..F24 already match XKB naming as-is.
+        None if function_key_number(key).is_some() => key.to_string(),
+        // Single letters (A-Z) and digits (0-9): XKB names these lowercase.
+        None => key.to_ascii_lowercase(),
+    }
+}
+
+/// Translates the renderer's shortcut string ("Ctrl + Alt + D", built by
+/// renderer/src/web/Config.ts's getConfigForHost) into what the
+/// GlobalShortcuts portal's `preferred_trigger` expects: uppercase
+/// modifiers joined by "+", then the XKB key name ("CTRL+ALT+d"). Confirmed
+/// live: the renderer's own spaced/title-case string silently binds nothing.
 pub fn to_portal_trigger(shortcut: &str) -> String {
     let tokens: Vec<&str> = shortcut.split(" + ").collect();
     let Some((key, modifiers)) = tokens.split_last() else {
@@ -198,9 +228,7 @@ pub struct ParsedHostConfig {
 
 pub fn parse_host_config(payload: &serde_json::Value, logger: &Arc<Logger>) -> ParsedHostConfig {
     let parsed = serde_json::from_value::<HostConfig>(payload.clone()).unwrap_or_else(|err| {
-        let msg = format!("[host_config] bad update-host-config payload: {err}");
-        eprintln!("{msg}");
-        logger.write(&msg);
+        logger.error(&format!("[host_config] bad update-host-config payload: {err}"));
         HostConfig::default()
     });
     ParsedHostConfig {
@@ -270,19 +298,6 @@ pub fn extra_registerable_actions() -> Vec<ShortcutAction> {
     ]
 }
 
-/// Stable, content-derived shortcut id — deliberately independent of
-/// `action.shortcut` (the trigger key). Hotkeys are now managed exclusively
-/// through KDE's own Global Shortcuts (System Settings, or ConfigureShortcuts)
-/// rather than the renderer's Settings > Hotkeys tab, which is hidden at the
-/// DOM level (see `HIDE_HOTKEYS_TAB_JS` in main.rs). Once an id is bound, its
-/// physical key is entirely KDE's to own — `apply_shortcuts` only ever binds
-/// an id the *first* time it's seen (see `all_shortcuts` in shortcuts.rs), so
-/// if the id included the trigger, changing the hotkey in KDE and then
-/// having the renderer resend its (unrelated, still-original) config would
-/// look like "a new id" and mint a second, competing binding for the same
-/// action. Keying only on action type + target + focus_overlay avoids that:
-/// the same action always maps to the same id no matter what key is
-/// currently assigned to it.
 /// Stable across runs and Rust versions, unlike `DefaultHasher`.
 fn fnv1a(text: &str) -> u64 {
     text.bytes().fold(0xcbf29ce484222325, |hash, byte| {
@@ -290,6 +305,14 @@ fn fnv1a(text: &str) -> u64 {
     })
 }
 
+/// Stable, content-derived shortcut id — deliberately independent of
+/// `action.shortcut` (the trigger key). Hotkeys are owned by KDE's Global
+/// Shortcuts (see `HOTKEY_UI_INFO_JS` in main.rs), and `apply_shortcuts`
+/// only binds an id the *first* time it's seen. If the id included the
+/// trigger, rebinding in KDE and then having the renderer resend its
+/// (still-original) config would mint a second, competing binding for the
+/// same action. Keying on action type + target + focus_overlay avoids that.
+/// `None` for `Unsupported` — those are never registered.
 pub fn shortcut_id(action: &ShortcutAction) -> Option<String> {
     let slug = |s: &str| {
         s.chars()
@@ -365,6 +388,21 @@ mod tests {
         assert_eq!(to_portal_trigger("Ctrl + ArrowUp"), "CTRL+Up");
         assert_eq!(to_portal_trigger("Ctrl + F5"), "CTRL+F5");
         assert_eq!(to_portal_trigger("Ctrl + Delete"), "CTRL+Delete");
+    }
+
+    #[test]
+    fn key_to_evdev_matches_input_event_codes() {
+        let cases = [
+            ("A", 30), ("C", 46), ("D", 32), ("Z", 44), ("1", 2), ("9", 10), ("0", 11),
+            ("F1", 59), ("F10", 68), ("F11", 87), ("F12", 88), ("F13", 183), ("F24", 194),
+            ("Ctrl", 29), ("Space", 57), ("Numpad0", 82),
+        ];
+        for (key, code) in cases {
+            assert_eq!(key_to_evdev(key), Some(code), "{key}");
+        }
+        assert_eq!(key_to_evdev("F25"), None);
+        assert_eq!(key_to_evdev("F"), Some(33)); // the letter, not a function key
+        assert_eq!(key_to_evdev(""), None);
     }
 
     #[test]

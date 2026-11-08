@@ -1,174 +1,77 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ashpd::WindowIdentifier;
 use ashpd::desktop::CreateSessionOptions;
 use ashpd::desktop::Session;
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use futures_util::StreamExt;
-use gtk4::{ApplicationWindow, glib};
+use gtk4::glib;
 use gtk4_layer_shell::LayerShell;
 use serde_json::json;
 
 use crate::host_config::{
-    ActionKind, ShortcutAction, default_actions, extra_registerable_actions, shortcut_id,
+    ActionKind, ParsedHostConfig, ShortcutAction, default_actions, extra_registerable_actions,
+    shortcut_id,
 };
-use crate::kwin_tracker::WindowEvent;
-use crate::logger::Logger;
 use crate::remote_input::{MOD_ALT, MOD_CTRL, RemoteInput};
-use crate::server::{EventBus, UiRequest};
-use crate::{set_click_through, toggle_click_through};
+use crate::{Overlay, with_timeout};
 
-pub fn spawn(
-    window: ApplicationWindow,
-    click_through: Rc<Cell<bool>>,
-    kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
-    remote_input: Rc<RefCell<Option<RemoteInput>>>,
-    events: Arc<EventBus>,
-    logger: Arc<Logger>,
-    active_window: Rc<RefCell<Option<WindowEvent>>>,
-    ui_request_rx: async_channel::Receiver<UiRequest>,
-    shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
-    restore_clipboard_rx: async_channel::Receiver<bool>,
-    price_check_open: Rc<Cell<bool>>,
-    price_check_locked: Rc<Cell<bool>>,
-) {
-    let restore_clipboard: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    {
-        let restore_clipboard = restore_clipboard.clone();
-        glib::spawn_future_local(async move {
-            while let Ok(value) = restore_clipboard_rx.recv().await {
-                restore_clipboard.set(value);
-            }
-        });
-    }
-
-    {
-        let window = window.clone();
-        let click_through = click_through.clone();
-        let events = events.clone();
-        let price_check_open = price_check_open.clone();
-        let price_check_locked = price_check_locked.clone();
-        let kwin_connection = kwin_connection.clone();
-        let remote_input = remote_input.clone();
-        let logger = logger.clone();
-        let restore_clipboard = restore_clipboard.clone();
-        glib::spawn_future_local(async move {
-            while let Ok(request) = ui_request_rx.recv().await {
-                // Both are assertGameActive first: the renderer's title-bar
-                // "x" button sends focus-game instead of just hiding itself
-                // locally (OverlayWindow.ts), and text-box.ts's stashSearch
-                // hands focus back to the game before typing into it.
-                close_all_ui(
-                    &window,
-                    &click_through,
-                    &events,
-                    &price_check_open,
-                    &price_check_locked,
-                    &kwin_connection,
-                )
-                .await;
-                if let UiRequest::StashSearch(text) = request {
-                    paste_action(
-                        &ActionKind::StashSearch { text },
-                        "",
-                        &kwin_connection,
-                        &remote_input,
-                        &logger,
-                        restore_clipboard.get(),
-                    )
-                    .await;
-                }
-            }
-        });
-    }
-
+pub fn spawn(overlay: Rc<Overlay>, host_config_rx: async_channel::Receiver<ParsedHostConfig>) {
     glib::spawn_future_local(async move {
-        if let Err(err) = run(
-            &window,
-            &click_through,
-            &kwin_connection,
-            &remote_input,
-            &events,
-            &logger,
-            &price_check_open,
-            &price_check_locked,
-            &active_window,
-            shortcut_config_rx,
-            &restore_clipboard,
-        )
-        .await
-        {
-            eprintln!("[shortcuts] error: {err}");
+        if let Err(err) = run(&overlay, host_config_rx).await {
+            overlay.logger.error(&format!("[shortcuts] error: {err}"));
         }
     });
 }
 
-/// Force click-through back on and close any open overlay widgets, as an
-/// always-available safety hatch regardless of what's currently showing.
-/// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
-pub(crate) async fn close_all_ui(
-    window: &ApplicationWindow,
-    click_through: &Rc<Cell<bool>>,
-    events: &Arc<EventBus>,
-    price_check_open: &Rc<Cell<bool>>,
-    price_check_locked: &Rc<Cell<bool>>,
-    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
-) {
-    println!(
-        "[shortcuts] close_all_ui called, price_check_open={}, price_check_locked={}, click_through was {}",
-        price_check_open.get(),
-        price_check_locked.get(),
-        click_through.get()
-    );
-    if price_check_open.get() {
-        events.broadcast(
-            "MAIN->OVERLAY::hide-exclusive-widget",
-            serde_json::Value::Null,
-        );
-        price_check_open.set(false);
-    }
-    price_check_locked.set(false);
-    set_click_through(true, window, click_through, events);
+/// Every NewShortcut we've ever wanted bound (keyed by id, never shrinks)
+/// plus the current id → action dispatch map.
+#[derive(Default)]
+struct Bindings {
+    all_shortcuts: HashMap<String, NewShortcut>,
+    dispatch: HashMap<String, ShortcutAction>,
+}
 
-    // Restoring click-through doesn't hand real OS focus back to PoE on its
-    // own -- see activate_path_of_exile's doc comment for why. Best-effort:
-    // a failure here just means the user has to click the game once more
-    // themselves, not a reason to abort the rest of this cleanup.
-    let connection = kwin_connection.borrow().clone();
-    if let Some(connection) = connection {
-        if let Err(err) = crate::kwin_tracker::activate_path_of_exile(&connection).await {
-            eprintln!("[shortcuts] failed to re-activate Path of Exile: {err}");
-        }
+fn shortcut_description(action: &ActionKind) -> String {
+    match action {
+        // Matches real APT's own action type name and hotkeys.vue's row
+        // label rather than our click-through implementation detail.
+        ActionKind::ToggleOverlay => "Toggle overlay".to_string(),
+        // Locked/unlocked price-check share target "price-check"; without
+        // the suffix both show up in KDE's Shortcuts list under one name.
+        ActionKind::CopyItem {
+            target,
+            focus_overlay: true,
+        } => format!("Copy item ({target}, locked)"),
+        ActionKind::CopyItem {
+            target,
+            focus_overlay: false,
+        } => format!("Copy item ({target})"),
+        ActionKind::TriggerEvent { target } => format!("Widget action ({target})"),
+        ActionKind::PasteInChat { text, .. } => format!("Paste in chat ({text})"),
+        ActionKind::StashSearch { text } => format!("Stash search ({text})"),
+        ActionKind::Unsupported => "Unsupported".to_string(),
     }
 }
 
 /// Binds any actions not already bound this session and refreshes the
 /// dispatch map from `actions`. Confirmed empirically against a live KDE
-/// session (checking ~/.config/kglobalshortcutsrc after two separate
-/// bind_shortcuts calls): the portal's own doc calls BindShortcuts additive,
-/// but KDE's kglobalaccel backend actually replaces this app-id's *entire*
-/// persisted grant set with whatever's supplied in the *latest* call — a
-/// second call with only the newly-added shortcuts silently dropped every
-/// previously-bound one. So `all_shortcuts` accumulates every NewShortcut
-/// we've ever wanted bound (keyed by id, never shrinks) and the *full*
-/// accumulated list is resupplied on every call that has anything new,
-/// never just the delta. `dispatch` is wholesale-replaced each call from
-/// the current config only, so actions dropped from it simply have no
-/// entry left to look up (their old id, if pressed, is a harmless no-op).
-/// Since `host_config::shortcut_id` is now trigger-independent (stable per
-/// action, not per hotkey — see its doc comment), a "dropped" id here means
-/// the action itself disappeared from config (e.g. a widget got disabled),
-/// not that its hotkey merely changed — changing the hotkey no longer
-/// touches `all_shortcuts`/`dispatch` at all, since the id doesn't change.
+/// session: the portal's own doc calls BindShortcuts additive, but KDE's
+/// kglobalaccel backend replaces this app-id's *entire* persisted grant set
+/// with whatever the *latest* call supplied. So the *full* accumulated
+/// `all_shortcuts` list is resupplied on every call that has anything new,
+/// never just the delta. `dispatch` is replaced wholesale from the current
+/// config, so actions dropped from it have no entry left (pressing their
+/// old id is a harmless no-op). Ids are trigger-independent (see
+/// `host_config::shortcut_id`), so a hotkey change alone touches nothing.
 async fn apply_shortcuts(
     proxy: &GlobalShortcuts,
     session: &Session<GlobalShortcuts>,
     window_id: Option<&WindowIdentifier>,
-    all_shortcuts: &Rc<RefCell<HashMap<String, NewShortcut>>>,
-    dispatch: &Rc<RefCell<HashMap<String, ShortcutAction>>>,
+    bindings: &RefCell<Bindings>,
     actions: Vec<ShortcutAction>,
 ) -> ashpd::Result<()> {
     let mut added_new = false;
@@ -178,223 +81,126 @@ async fn apply_shortcuts(
         let Some(id) = shortcut_id(&action) else {
             continue;
         };
-        if !all_shortcuts.borrow().contains_key(&id) {
-            let description = match &action.action {
-                // Matches real APT's own action type name ('toggle-overlay')
-                // and the row's own label in hotkeys.vue ("Overlay") rather
-                // than leaking our internal click-through implementation
-                // detail into KDE's user-facing Shortcuts list.
-                ActionKind::ToggleOverlay => "Toggle overlay".to_string(),
-                // Locked/unlocked price-check share the same target
-                // ("price-check") — without the focus_overlay suffix both
-                // would show up in KDE's own Shortcuts list under the
-                // identical name "Copy item (price-check)", indistinguishable
-                // from each other there.
-                ActionKind::CopyItem {
-                    target,
-                    focus_overlay: true,
-                } => format!("Copy item ({target}, locked)"),
-                ActionKind::CopyItem {
-                    target,
-                    focus_overlay: false,
-                } => format!("Copy item ({target})"),
-                ActionKind::TriggerEvent { target } => format!("Widget action ({target})"),
-                ActionKind::PasteInChat { text, .. } => format!("Paste in chat ({text})"),
-                ActionKind::StashSearch { text } => format!("Stash search ({text})"),
-                ActionKind::Unsupported => unreachable!(),
-            };
+        if !bindings.borrow().all_shortcuts.contains_key(&id) {
             // Empty shortcut (extra_registerable_actions' unset-by-default
-            // entries) -> empty trigger -> register with no preferred
-            // trigger at all, so it still shows up in KDE's own Global
-            // Shortcuts settings as a nameable, bindable-but-currently-unset
-            // entry rather than silently not existing there.
+            // entries) → no preferred trigger, so it still shows up in KDE's
+            // Global Shortcuts settings as a bindable-but-unset entry.
             let trigger = crate::host_config::to_portal_trigger(&action.shortcut);
-            let preferred_trigger = if trigger.is_empty() { None } else { Some(trigger.as_str()) };
-            let new_shortcut = NewShortcut::new(id.clone(), description).preferred_trigger(preferred_trigger);
-            all_shortcuts.borrow_mut().insert(id.clone(), new_shortcut);
+            let preferred_trigger = (!trigger.is_empty()).then_some(trigger.as_str());
+            let new_shortcut = NewShortcut::new(id.clone(), shortcut_description(&action.action))
+                .preferred_trigger(preferred_trigger);
+            bindings.borrow_mut().all_shortcuts.insert(id.clone(), new_shortcut);
             added_new = true;
         }
         fresh_dispatch.insert(id, action);
     }
 
     if added_new {
-        let full_list: Vec<NewShortcut> = all_shortcuts.borrow().values().cloned().collect();
+        let full_list: Vec<NewShortcut> = bindings.borrow().all_shortcuts.values().cloned().collect();
         let request = proxy
-            .bind_shortcuts(
-                session,
-                &full_list,
-                window_id,
-                BindShortcutsOptions::default(),
-            )
+            .bind_shortcuts(session, &full_list, window_id, BindShortcutsOptions::default())
             .await?;
-        let bound = request.response()?;
-        for s in bound.shortcuts() {
-            println!(
-                "[shortcuts] bound {} -> {}",
-                s.id(),
-                s.trigger_description()
-            );
+        for s in request.response()?.shortcuts() {
+            println!("[shortcuts] bound {} -> {}", s.id(), s.trigger_description());
         }
     }
 
-    *dispatch.borrow_mut() = fresh_dispatch;
+    bindings.borrow_mut().dispatch = fresh_dispatch;
     Ok(())
 }
 
 async fn run(
-    window: &ApplicationWindow,
-    click_through: &Rc<Cell<bool>>,
-    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
-    remote_input: &Rc<RefCell<Option<RemoteInput>>>,
-    events: &Arc<EventBus>,
-    logger: &Arc<Logger>,
-    price_check_open: &Rc<Cell<bool>>,
-    price_check_locked: &Rc<Cell<bool>>,
-    active_window: &Rc<RefCell<Option<WindowEvent>>>,
-    shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
-    restore_clipboard: &Rc<Cell<bool>>,
+    overlay: &Rc<Overlay>,
+    host_config_rx: async_channel::Receiver<ParsedHostConfig>,
 ) -> ashpd::Result<()> {
     let proxy = GlobalShortcuts::new().await?;
     let session = proxy
         .create_session(CreateSessionOptions::default())
         .await?;
-    let window_id = WindowIdentifier::from_native(window).await;
-
-    let all_shortcuts: Rc<RefCell<HashMap<String, NewShortcut>>> = Rc::new(RefCell::new(HashMap::new()));
-    let dispatch: Rc<RefCell<HashMap<String, ShortcutAction>>> =
-        Rc::new(RefCell::new(HashMap::new()));
+    let window_id = WindowIdentifier::from_native(&overlay.window).await;
 
     // Registers every copy-item target the original renderer UI could ever
-    // configure, not just the 3 with a sensible default trigger — otherwise,
-    // since our Hotkeys/Item Info tabs no longer expose a way to set them,
-    // there'd be no way to ever discover or enable them via KDE's own
-    // Global Shortcuts settings either.
+    // configure, not just the 3 with a sensible default trigger — our
+    // Hotkeys/Item Info tabs no longer expose them, so KDE's own Global
+    // Shortcuts settings are the only place a user can find them.
+    let bindings = Rc::new(RefCell::new(Bindings::default()));
     let mut initial_actions = default_actions();
     initial_actions.extend(extra_registerable_actions());
-    apply_shortcuts(
-        &proxy,
-        &session,
-        window_id.as_ref(),
-        &all_shortcuts,
-        &dispatch,
-        initial_actions,
-    )
-    .await?;
-
-    // Debounce: the portal has been observed emitting multiple Activated
-    // signals for what looked like a single physical keypress (several
-    // rapid modifier transitions logged for one press during testing) —
-    // without this, that means duplicate Ctrl+C injections and duplicate
-    // proxy/network requests per press.
-    const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
-    let mut last_activation: Option<std::time::Instant> = None;
+    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, initial_actions).await?;
 
     let mut activated = proxy.receive_activated().await?;
 
     // Live-updates the same session's bindings whenever the renderer sends
-    // a new CLIENT->MAIN::update-host-config — moved into its own task since
-    // it needs to hold proxy/session for the rest of the app's lifetime,
-    // same as the activation loop below.
+    // CLIENT->MAIN::update-host-config.
     {
-        let all_shortcuts = all_shortcuts.clone();
-        let dispatch = dispatch.clone();
-        let logger = logger.clone();
+        let bindings = bindings.clone();
+        let overlay = overlay.clone();
         glib::spawn_future_local(async move {
-            while let Ok(actions) = shortcut_config_rx.recv().await {
-                if let Err(err) = apply_shortcuts(
-                    &proxy,
-                    &session,
-                    window_id.as_ref(),
-                    &all_shortcuts,
-                    &dispatch,
-                    actions,
-                )
-                .await
-                {
-                    let msg = format!("[shortcuts] failed to apply updated shortcuts: {err}");
-                    eprintln!("{msg}");
-                    logger.write(&msg);
+            while let Ok(config) = host_config_rx.recv().await {
+                overlay.restore_clipboard.set(config.restore_clipboard);
+                let result =
+                    apply_shortcuts(&proxy, &session, window_id.as_ref(), &bindings, config.shortcuts).await;
+                if let Err(err) = result {
+                    overlay
+                        .logger
+                        .error(&format!("[shortcuts] failed to apply updated shortcuts: {err}"));
                 }
             }
         });
     }
 
+    // Debounce: the portal has been observed emitting multiple Activated
+    // signals for one physical keypress — without this, duplicate Ctrl+C
+    // injections and proxy requests. Per id, so two different hotkeys
+    // pressed in quick succession both still fire.
+    const DEBOUNCE: Duration = Duration::from_millis(300);
+    let mut last_activation: HashMap<String, Instant> = HashMap::new();
+
     while let Some(event) = activated.next().await {
-        let now = std::time::Instant::now();
-        if last_activation.is_some_and(|t| now.duration_since(t) < DEBOUNCE) {
-            println!("[shortcuts] Activated id={} dropped by debounce", event.shortcut_id());
+        let id = event.shortcut_id();
+        let now = Instant::now();
+        if last_activation
+            .get(id)
+            .is_some_and(|t| now.duration_since(*t) < DEBOUNCE)
+        {
+            println!("[shortcuts] Activated id={id} dropped by debounce");
             continue;
         }
-        last_activation = Some(now);
+        last_activation.insert(id.to_string(), now);
 
-        let Some(action) = dispatch.borrow().get(event.shortcut_id()).cloned() else {
-            println!(
-                "[shortcuts] Activated id={} has no dispatch entry ({} known)",
-                event.shortcut_id(),
-                dispatch.borrow().len()
-            );
+        let Some(action) = bindings.borrow().dispatch.get(id).cloned() else {
+            println!("[shortcuts] Activated id={id} has no dispatch entry");
             continue;
         };
         match action.action {
             ActionKind::ToggleOverlay => {
                 println!(
                     "[shortcuts] toggle-overlay activated, click_through was {}",
-                    click_through.get()
+                    overlay.click_through.get()
                 );
-                // Real APT only registers hotkeys while PoE is focused (and
-                // handles overlayKey locally while the overlay is active), so
+                // Real APT only registers hotkeys while PoE is focused, so
                 // activating over another app is a no-op there. Deactivating
                 // stays unconditional so the overlay can't get stuck active.
-                let poe_active = active_window
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(WindowEvent::is_path_of_exile);
-                if click_through.get() && !poe_active {
+                if overlay.click_through.get() && !overlay.poe_active() {
                     println!("[shortcuts] toggle-overlay ignored: active window is not Path of Exile");
                 } else {
                     // Shortcuts.ts: areaTracker.removeListeners() first.
-                    AUTO_CLOSE_GEN.with(|g| g.set(g.get() + 1));
-                    toggle_click_through(window, click_through, events)
+                    overlay.auto_close_gen.set(overlay.auto_close_gen.get() + 1);
+                    overlay.toggle_click_through();
                 }
             }
             ActionKind::CopyItem {
-                target,
+                ref target,
                 focus_overlay,
-            } => {
-                price_check(
-                    window,
-                    click_through,
-                    kwin_connection,
-                    remote_input,
-                    events,
-                    logger,
-                    price_check_open,
-                    price_check_locked,
-                    active_window,
-                    &target,
-                    focus_overlay,
-                    &action.shortcut,
-                    action.keep_mod_keys,
-                    restore_clipboard,
-                )
-                .await
-            }
-            ActionKind::TriggerEvent { target } => {
-                events.broadcast("MAIN->CLIENT::widget-action", json!({ "target": target }))
-            }
+            } => price_check(overlay, target, focus_overlay, &action.shortcut, action.keep_mod_keys).await,
+            ActionKind::TriggerEvent { target } => overlay
+                .events
+                .broadcast("MAIN->CLIENT::widget-action", json!({ "target": target })),
             ActionKind::PasteInChat { .. } | ActionKind::StashSearch { .. } => {
                 // Real APT has every hotkey unregistered while the overlay
                 // is interactive; typing into PoE then would be surprising.
-                if click_through.get() {
-                    paste_action(
-                        &action.action,
-                        &action.shortcut,
-                        kwin_connection,
-                        remote_input,
-                        logger,
-                        restore_clipboard.get(),
-                    )
-                    .await
+                if overlay.click_through.get() {
+                    paste_action(overlay, &action.action, &action.shortcut).await
                 }
             }
             ActionKind::Unsupported => {}
@@ -408,114 +214,72 @@ async fn run(
 /// confirmed focused right now: a stray Enter or Ctrl+A landing in another
 /// app is worse than a dropped press. Bounded like price_check, since this
 /// runs inline in the hotkey loop.
-async fn paste_action(
-    action: &ActionKind,
-    hotkey: &str,
-    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
-    remote_input: &Rc<RefCell<Option<RemoteInput>>>,
-    logger: &Arc<Logger>,
-    restore_clipboard: bool,
-) {
-    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-    let work = std::pin::pin!(async {
-        let connection = kwin_connection.borrow().clone()?;
+pub(crate) async fn paste_action(overlay: &Overlay, action: &ActionKind, hotkey: &str) {
+    let restore = overlay.restore_clipboard.get();
+    let work = async {
+        let connection = overlay.kwin()?;
         let (_, _, poe_active) = crate::kwin_tracker::query_cursor_pos(&connection).await.ok()?;
         if !poe_active {
             return None;
         }
-        let remote_ref = remote_input.borrow();
-        let remote = remote_ref.as_ref()?;
+        let remote = overlay.remote()?;
         match action {
             ActionKind::PasteInChat { text, send } => {
-                remote.type_in_chat(text, *send, hotkey, restore_clipboard).await
+                remote.type_in_chat(text, *send, hotkey, restore).await
             }
-            ActionKind::StashSearch { text } => {
-                remote.stash_search(text, hotkey, restore_clipboard).await
-            }
+            ActionKind::StashSearch { text } => remote.stash_search(text, hotkey, restore).await,
             _ => {}
         }
         Some(())
-    });
-    let timeout = std::pin::pin!(glib::timeout_future(TIMEOUT));
-    let msg = match futures_util::future::select(work, timeout).await {
-        futures_util::future::Either::Left((Some(()), _)) => return,
-        futures_util::future::Either::Left((None, _)) => {
-            "[shortcuts] paste skipped: Path of Exile not focused (or input not ready)"
-        }
-        futures_util::future::Either::Right(_) => "[shortcuts] paste timed out (portal or KWin call hung)",
     };
-    eprintln!("{msg}");
-    logger.write(msg);
-}
-
-thread_local! {
-    static AUTO_CLOSE_GEN: Cell<u64> = const { Cell::new(0) };
+    let msg = match with_timeout(Duration::from_secs(2), work).await {
+        Some(Some(())) => return,
+        Some(None) => "[shortcuts] paste skipped: Path of Exile not focused (or input not ready)",
+        None => "[shortcuts] paste timed out (portal or KWin call hung)",
+    };
+    overlay.logger.error(msg);
 }
 
 /// Handles any `copy-item` action: presses Ctrl+C, reads the clipboard, and
 /// broadcasts item-text with whatever `target` the bound action specifies
-/// (real APT's own copy-item targets aren't just "price-check" — open-wiki,
-/// open-craft-of-exile, open-poedb, search-similar, and item-check all go
-/// through this same flow, per renderer/src/web/Config.ts's
-/// getConfigForHost — the renderer decides what UI to show per target).
+/// (open-wiki, open-poedb, item-check, … all go through this same flow, per
+/// renderer/src/web/Config.ts's getConfigForHost — the renderer decides
+/// what UI to show per target).
 async fn price_check(
-    window: &ApplicationWindow,
-    click_through: &Rc<Cell<bool>>,
-    kwin_connection: &Rc<RefCell<Option<zbus::Connection>>>,
-    remote_input: &Rc<RefCell<Option<RemoteInput>>>,
-    events: &Arc<EventBus>,
-    logger: &Arc<Logger>,
-    price_check_open: &Rc<Cell<bool>>,
-    price_check_locked: &Rc<Cell<bool>>,
-    active_window: &Rc<RefCell<Option<WindowEvent>>>,
+    overlay: &Rc<Overlay>,
     target: &str,
     focus_overlay: bool,
     shortcut: &str,
     keep_mod_keys: bool,
-    restore_clipboard: &Rc<Cell<bool>>,
 ) {
     println!(
         "[shortcuts] price_check called, target={target}, focus_overlay={focus_overlay}, price_check_open={}",
-        price_check_open.get()
+        overlay.price_check_open.get()
     );
     // Locked popup open: the overlay holds keyboard focus, so an injected
     // Ctrl+C would land in our own WebView, not the game — pressing again
     // just closes it and hands control back (real APT has shortcuts
     // unregistered entirely while the overlay is active). An *unlocked*
     // popup falls through to a fresh check like real Shortcuts.ts, which
-    // re-reads on every press; toggling it closed here used to swallow
-    // every second press (e.g. hovering a second item while the first
-    // popup was still up).
-    if price_check_open.get() && price_check_locked.get() {
-        events.broadcast(
-            "MAIN->OVERLAY::hide-exclusive-widget",
-            serde_json::Value::Null,
-        );
-        price_check_open.set(false);
-        set_click_through(true, window, click_through, events);
-        price_check_locked.set(false);
+    // re-reads on every press.
+    if overlay.price_check_open.get() && overlay.price_check_locked.get() {
+        overlay.hide_price_check();
+        overlay.set_click_through(true);
+        overlay.price_check_locked.set(false);
         return;
     }
 
-    // The global shortcut fires regardless of which window has focus; without
-    // this check, pressing it over any other app (browser, terminal, ...)
-    // would Ctrl+C-and-read whatever text is selected there. Only forward the
-    // hotkey to the game.
-    let is_poe = active_window
-        .borrow()
-        .as_ref()
-        .is_some_and(WindowEvent::is_path_of_exile);
-    if !is_poe {
+    // The global shortcut fires regardless of which window has focus; only
+    // forward it to the game, or it would Ctrl+C whatever is selected in
+    // e.g. a browser.
+    if !overlay.poe_active() {
         println!("[shortcuts] price-check ignored: active window is not Path of Exile");
         return;
     }
 
-    let started = std::time::Instant::now();
-    let remote_ref = remote_input.borrow();
-    let Some(remote) = remote_ref.as_ref() else {
-        let msg = "[shortcuts] price-check: remote input not ready yet";
-        eprintln!("{msg}");
-        logger.write(msg);
+    let started = Instant::now();
+    let Some(remote) = overlay.remote() else {
+        overlay.logger.error("[shortcuts] price-check: remote input not ready yet");
         return;
     };
 
@@ -524,56 +288,49 @@ async fn price_check(
     // Running it in parallel with the copy was faster but let Ctrl+C land
     // in whatever window had just taken focus (confirmed live: a terminal).
     let cursor_query = async {
-        let connection = kwin_connection.borrow().clone();
-        match connection {
-            Some(connection) => match crate::kwin_tracker::query_cursor_pos(&connection).await {
-                Ok(pos) => Some(pos),
-                Err(err) => {
-                    let msg = format!("[shortcuts] price-check cursor query failed: {err}");
-                    eprintln!("{msg}");
-                    logger.write(&msg);
-                    None
-                }
-            },
-            None => {
-                let msg = "[shortcuts] price-check: kwin connection not ready yet";
-                eprintln!("{msg}");
-                logger.write(msg);
+        let Some(connection) = overlay.kwin() else {
+            overlay.logger.error("[shortcuts] price-check: kwin connection not ready yet");
+            return None;
+        };
+        match crate::kwin_tracker::query_cursor_pos(&connection).await {
+            Ok(pos) => Some(pos),
+            Err(err) => {
+                overlay
+                    .logger
+                    .error(&format!("[shortcuts] price-check cursor query failed: {err}"));
                 None
             }
         }
     };
 
     // copy_item_text presses Ctrl+C, snapshots + clears the clipboard, then
-    // polls (48ms steps, up to ~500ms) for the game's copy to land. Uses the
-    // portal's clipboard rather than gdk::Clipboard, which only reliably
-    // reflects content while our own window has keyboard focus.
-    //
-    // Overall cap: some portal calls in copy_item_text (e.g. the clipboard
-    // clear/restore writes) have no timeout of their own, and this runs
-    // inline in the hotkey loop — one hung call used to freeze every later
-    // hotkey until restart. Confirmed live once after a portal read hang.
-    const PRICE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-    let work = std::pin::pin!(async {
+    // polls (48ms steps, up to ~500ms) for the game's copy to land, via the
+    // portal's clipboard (gdk::Clipboard only reflects content while our own
+    // window has keyboard focus). Overall cap: some portal calls in there
+    // (the clipboard clear/restore writes) have no timeout of their own, and
+    // this runs inline in the hotkey loop.
+    let work = async {
         let cursor = cursor_query.await;
         // Cursor query failed → can't re-verify; fall back to the cached
         // check above rather than breaking price-check outright.
         if cursor.is_some_and(|(_, _, poe_active)| !poe_active) {
             return None;
         }
-        Some((cursor, remote.copy_item_text(restore_clipboard.get(), shortcut, keep_mod_keys).await))
-    });
-    let timeout = std::pin::pin!(glib::timeout_future(PRICE_CHECK_TIMEOUT));
-    let (cursor, copied) = match futures_util::future::select(work, timeout).await {
-        futures_util::future::Either::Left((Some(result), _)) => result,
-        futures_util::future::Either::Left((None, _)) => {
+        let copied = remote
+            .copy_item_text(overlay.restore_clipboard.get(), shortcut, keep_mod_keys)
+            .await;
+        Some((cursor, copied))
+    };
+    let (cursor, copied) = match with_timeout(Duration::from_secs(2), work).await {
+        Some(Some(result)) => result,
+        Some(None) => {
             println!("[shortcuts] price-check skipped: focus left Path of Exile before Ctrl+C");
             return;
         }
-        futures_util::future::Either::Right(_) => {
-            let msg = "[shortcuts] price-check timed out (portal or KWin call hung)";
-            eprintln!("{msg}");
-            logger.write(msg);
+        None => {
+            overlay
+                .logger
+                .error("[shortcuts] price-check timed out (portal or KWin call hung)");
             return;
         }
     };
@@ -586,9 +343,9 @@ async fn price_check(
             return;
         }
         Err(err) => {
-            let msg = format!("[shortcuts] price-check clipboard read failed: {err}");
-            eprintln!("{msg}");
-            logger.write(&msg);
+            overlay
+                .logger
+                .error(&format!("[shortcuts] price-check clipboard read failed: {err}"));
             return;
         }
     };
@@ -598,16 +355,11 @@ async fn price_check(
         started.elapsed().as_millis()
     );
 
-    // `target` is whatever the bound action's config specifies (e.g. the
-    // renderer's PriceCheckWindow.vue listens for target:"price-check").
-    // focusOverlay matches the real app's own hotkey semantics (renderer/
-    // src/web/price-check/PriceCheckWindow.vue): plain Ctrl+D sends
-    // focusOverlay:false and auto-closes on mouse-move-away; Ctrl+Alt+D
-    // ("hotkeyLocked") sends focusOverlay:true, which skips that (real
-    // APT's own hover-to-interact replacement for the auto-close path —
-    // ours is a simpler Rust-side poll, see spawn_auto_close).
-    events.clear_track_area();
-    events.send_last_active(
+    // focusOverlay matches the real app's hotkey semantics
+    // (PriceCheckWindow.vue): plain Ctrl+D auto-closes on mouse-move-away
+    // (spawn_auto_close), Ctrl+Alt+D ("hotkeyLocked") opens interactive.
+    overlay.events.clear_track_area();
+    overlay.events.send_last_active(
         "MAIN->CLIENT::item-text",
         json!({
             "target": target,
@@ -616,31 +368,16 @@ async fn price_check(
             "focusOverlay": focus_overlay,
         }),
     );
-    price_check_open.set(true);
-    if focus_overlay && events.overlay_was_used_recently() {
-        // The locked popup is meant to be interacted with (read, click,
-        // copy) without the game stealing clicks underneath it. Only do
-        // this when the overlay itself (not a plain browser tab opened via
-        // the tray's "Open in Browser") was the last client to report
-        // activity — otherwise the item-text payload above went to that
-        // browser tab, not anything the overlay is showing, and forcing
-        // click-through off here would just steal input from the game for
-        // no visible popup. Mirrors real Shortcuts.ts's own single
-        // condition (`action.focusOverlay && this.overlay.wasUsedRecently`).
-        set_click_through(false, window, click_through, events);
-        price_check_locked.set(true);
+    overlay.price_check_open.set(true);
+    // Mirrors Shortcuts.ts's `action.focusOverlay && this.overlay.wasUsedRecently`:
+    // if a plain browser tab (tray's "Open in Browser") got the item-text,
+    // there's no overlay popup to interact with, so don't steal input from
+    // the game.
+    if focus_overlay && overlay.events.overlay_was_used_recently() {
+        overlay.set_click_through(false);
+        overlay.price_check_locked.set(true);
     } else {
-        spawn_auto_close(
-            x,
-            y,
-            window.clone(),
-            click_through.clone(),
-            kwin_connection.clone(),
-            remote_input.clone(),
-            events.clone(),
-            price_check_open.clone(),
-            price_check_locked.clone(),
-        );
+        spawn_auto_close(overlay.clone(), x, y);
     }
 }
 
@@ -655,52 +392,37 @@ async fn price_check(
 ///
 /// ponytail: upstream's mousedown-in-area handler is skipped; a click
 /// inside the area is always preceded by a move there, which this covers.
-fn spawn_auto_close(
-    from_x: f64,
-    from_y: f64,
-    window: ApplicationWindow,
-    click_through: Rc<Cell<bool>>,
-    kwin_connection: Rc<RefCell<Option<zbus::Connection>>>,
-    remote_input: Rc<RefCell<Option<RemoteInput>>>,
-    events: Arc<EventBus>,
-    price_check_open: Rc<Cell<bool>>,
-    price_check_locked: Rc<Cell<bool>>,
-) {
+fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
     // Upstream's threshold is the renderer's closeThreshold (2.5 * font
-    // size, ~40px); kept at our older, more generous 80px so small mouse
-    // drift while reading doesn't close it prematurely.
+    // size, ~40px); kept at a more generous 80px so small mouse drift while
+    // reading doesn't close it prematurely.
     //
-    // POLL_INTERVAL was tried at 40ms for a snappier close, but each tick
-    // costs a full KWin loadScript/run/unloadScript D-Bus round trip plus
-    // temp-file I/O (query_cursor_pos is a one-shot mechanism, not meant for
-    // hot-loop polling) -- 25 of those a second was enough to make the whole
-    // compositor feel laggy, not just this popup. A push-based replacement
-    // (workspace.cursorPosChanged) was tried and reverted: the signal exists
-    // but doesn't actually fire on real mouse movement on this KWin version,
-    // so cursor tracking silently stopped updating and the popup never
-    // auto-closed at all. Back to 80ms, the original value, which never had
-    // either problem.
+    // POLL_INTERVAL: each tick is a full KWin loadScript/run/unloadScript
+    // round trip plus temp-file I/O; 40ms made the whole compositor feel
+    // laggy. workspace.cursorPosChanged (push-based) doesn't fire on real
+    // mouse movement on this KWin version, so polling it is.
     const CLOSE_THRESHOLD: f64 = 80.0;
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+    const POLL_INTERVAL: Duration = Duration::from_millis(80);
 
     // Mirrors WidgetAreaTracker's removeListeners() on every new item-text:
     // a newer check supersedes this loop, or it would close the new popup
     // as soon as the cursor left the *previous* item's position.
-    let generation = AUTO_CLOSE_GEN.with(|g| {
-        g.set(g.get() + 1);
-        g.get()
-    });
+    let generation = overlay.auto_close_gen.get() + 1;
+    overlay.auto_close_gen.set(generation);
+    let superseded = {
+        let overlay = overlay.clone();
+        move || overlay.auto_close_gen.get() != generation
+    };
 
     glib::spawn_future_local(async move {
         loop {
             glib::timeout_future(POLL_INTERVAL).await;
 
-            if !price_check_open.get() || AUTO_CLOSE_GEN.with(Cell::get) != generation {
+            if !overlay.price_check_open.get() || superseded() {
                 return; // closed some other way, or superseded by a newer check
             }
 
-            let connection = kwin_connection.borrow().clone();
-            let Some(connection) = connection else {
+            let Some(connection) = overlay.kwin() else {
                 continue;
             };
             let Ok((x, y, _)) = crate::kwin_tracker::query_cursor_pos(&connection).await else {
@@ -710,15 +432,12 @@ fn spawn_auto_close(
             // Re-check after the (slow) cursor query: a newer check may have
             // started while it was in flight, and closing now would hide
             // *that* popup.
-            if AUTO_CLOSE_GEN.with(Cell::get) != generation {
+            if superseded() {
                 return;
             }
 
-            let track = events.track_area();
-            let mods = remote_input
-                .borrow()
-                .as_ref()
-                .map_or(0, RemoteInput::depressed_mods);
+            let track = overlay.events.track_area();
+            let mods = overlay.remote().map_or(0, |r: Rc<RemoteInput>| r.depressed_mods());
             let modifier = if mods & MOD_CTRL != 0 {
                 "Ctrl"
             } else if mods & MOD_ALT != 0 {
@@ -729,46 +448,32 @@ fn spawn_auto_close(
             let holding = track.as_ref().is_some_and(|t| t.hold_key == modifier);
             // `area` is relative to the overlay window, which covers its
             // monitor; the cursor is in global compositor coordinates.
-            let (ox, oy) = window
-                .monitor()
-                .map_or((0.0, 0.0), |m| {
-                    let geo = gtk4::prelude::MonitorExt::geometry(&m);
-                    (geo.x() as f64, geo.y() as f64)
-                });
+            let (ox, oy) = overlay.window.monitor().map_or((0.0, 0.0), |m| {
+                let geo = gtk4::prelude::MonitorExt::geometry(&m);
+                (geo.x() as f64, geo.y() as f64)
+            });
             let inside = track
                 .as_ref()
                 .is_some_and(|t| t.area.contains(x - ox, y - oy));
 
-            if click_through.get() && !holding {
+            if overlay.click_through.get() && !holding {
                 let distance = ((x - from_x).powi(2) + (y - from_y).powi(2)).sqrt();
                 if distance > CLOSE_THRESHOLD {
                     println!("[shortcuts] auto-close: cursor moved {distance:.0}px");
-                    events.broadcast(
-                        "MAIN->OVERLAY::hide-exclusive-widget",
-                        serde_json::Value::Null,
-                    );
-                    price_check_open.set(false);
+                    overlay.hide_price_check();
                     return;
                 }
             } else if inside {
-                if click_through.get() {
+                if overlay.click_through.get() {
                     println!("[shortcuts] popup tracker: cursor entered popup, activating overlay");
-                    set_click_through(false, &window, &click_through, &events);
+                    overlay.set_click_through(false);
                     // Same state as a locked popup: the overlay owns input,
                     // so the next hotkey press closes instead of copying.
-                    price_check_locked.set(true);
+                    overlay.price_check_locked.set(true);
                 }
-            } else if !click_through.get() {
+            } else if !overlay.click_through.get() {
                 println!("[shortcuts] popup tracker: cursor left popup, returning to game");
-                close_all_ui(
-                    &window,
-                    &click_through,
-                    &events,
-                    &price_check_open,
-                    &price_check_locked,
-                    &kwin_connection,
-                )
-                .await;
+                overlay.close_all_ui().await;
                 return;
             }
         }

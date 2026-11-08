@@ -37,9 +37,7 @@ impl ConfigStore {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(err) = std::fs::write(&*path, contents) {
-            let msg = format!("[config_store] failed to save config: {err}");
-            eprintln!("{msg}");
-            logger.write(&msg);
+            logger.error(&format!("[config_store] failed to save config: {err}"));
         }
     }
 }

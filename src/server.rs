@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::config_store::ConfigStore;
-use crate::host_config::ShortcutAction;
+use crate::host_config::ParsedHostConfig;
 use crate::logger::Logger;
 
 // `cargo run` gets APT_KWIN_OVERLAY_DIST for free from .cargo/config.toml's
@@ -18,12 +18,26 @@ use crate::logger::Logger;
 // installs it.
 pub(crate) fn dist_dir() -> &'static Path {
     static DIST_DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIST_DIR.get_or_init(|| {
-        std::env::var("APT_KWIN_OVERLAY_DIST")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/usr/share/apt-kwin-overlay/dist"))
-    })
+    DIST_DIR.get_or_init(|| resolve_dist_dir(std::env::var_os("APT_KWIN_OVERLAY_DIST")))
 }
+
+fn resolve_dist_dir(env_override: Option<std::ffi::OsString>) -> PathBuf {
+    env_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/share/apt-kwin-overlay/dist"))
+}
+
+/// `base` joined with a request-path remainder, or `None` if it would
+/// escape `base` (`..`, absolute, or otherwise non-plain components).
+pub(crate) fn safe_join(base: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = Path::new(rel);
+    rel.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .then(|| base.join(rel))
+}
+
+/// Upstream's own upload cap (file-uploads.ts); nothing else posts more.
+const MAX_BODY_BYTES: usize = 16_000_000;
 
 type ClientId = u64;
 
@@ -61,13 +75,16 @@ impl Rect {
     }
 }
 
-/// Renderer requests the GTK main loop has to act on (it owns the window,
-/// click-through and input-injection state).
+/// Renderer requests the GTK main loop has to act on (it owns the
+/// `Application`, window, click-through and input-injection state).
 pub enum UiRequest {
     /// OVERLAY->MAIN::focus-game (the title-bar "x"): assertGameActive.
     FocusGame,
     /// CLIENT->MAIN::user-action {action:"stash-search"}.
     StashSearch(String),
+    /// CLIENT->MAIN::user-action {action:"quit"} (AppTray.ts listens for
+    /// the same event).
+    Quit,
 }
 
 pub struct EventBus {
@@ -84,50 +101,24 @@ pub struct EventBus {
     // item-text payload actually went to a browser tab, not the overlay.
     overlay_active: std::sync::atomic::AtomicBool,
     next_id: AtomicU64,
-    // The renderer's own title-bar "x" button sends OVERLAY->MAIN::focus-game
-    // (real APT's `assertGameActive` handler) instead of just hiding itself
-    // locally — it expects the host to actually restore click-through/close
-    // our widgets in response. This channel carries that request from the WS
-    // connection's own thread over to the GTK main loop, which owns the
-    // window/click-through state needed to act on it.
+    // WS connection threads → GTK main loop, which owns the state these
+    // act on. `host_config_tx` goes to shortcuts.rs's task holding the
+    // GlobalShortcuts session; everything else is a `UiRequest`.
     ui_request_tx: async_channel::Sender<UiRequest>,
+    host_config_tx: async_channel::Sender<ParsedHostConfig>,
     // Latest OVERLAY->MAIN::track-area (price-check popup bounds + holdKey),
     // read by shortcuts.rs's popup tracker on every poll.
     track_area: Mutex<Option<TrackArea>>,
-    // Carries a freshly parsed CLIENT->MAIN::update-host-config shortcut
-    // list from the WS connection's own thread over to the GTK main loop's
-    // shortcuts.rs task, which owns the ashpd GlobalShortcuts session that
-    // needs to react to it. Same shape as ui_request_tx/rx above.
-    shortcut_config_tx: async_channel::Sender<Vec<ShortcutAction>>,
-    // Carries the same update-host-config event's restoreClipboard flag,
-    // over to shortcuts.rs so price-check can pass it into
-    // RemoteInput::copy_item_text. Same shape as the two channels
-    // above, kept separate since it's consumed independently (doesn't touch
-    // apply_shortcuts's GlobalShortcuts bookkeeping).
-    restore_clipboard_tx: async_channel::Sender<bool>,
-    // Carries a CLIENT->MAIN::user-action {action:"quit"} request (the
-    // renderer's own quit button, real APT's AppTray.ts listens for the
-    // same event) from the WS connection's own thread over to the GTK main
-    // loop, which owns the `Application` needed to call `app.quit()`. Same
-    // shape as the three channels above.
-    quit_tx: async_channel::Sender<()>,
 }
 
-/// `(bus, ui_request_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx)`
-type EventBusChannels = (
-    EventBus,
-    async_channel::Receiver<UiRequest>,
-    async_channel::Receiver<Vec<ShortcutAction>>,
-    async_channel::Receiver<bool>,
-    async_channel::Receiver<()>,
-);
-
 impl EventBus {
-    pub(crate) fn new() -> EventBusChannels {
+    pub(crate) fn new() -> (
+        Self,
+        async_channel::Receiver<UiRequest>,
+        async_channel::Receiver<ParsedHostConfig>,
+    ) {
         let (ui_request_tx, ui_request_rx) = async_channel::unbounded();
-        let (shortcut_config_tx, shortcut_config_rx) = async_channel::unbounded();
-        let (restore_clipboard_tx, restore_clipboard_rx) = async_channel::unbounded();
-        let (quit_tx, quit_rx) = async_channel::unbounded();
+        let (host_config_tx, host_config_rx) = async_channel::unbounded();
         (
             Self {
                 clients: Mutex::new(HashMap::new()),
@@ -135,15 +126,11 @@ impl EventBus {
                 overlay_active: std::sync::atomic::AtomicBool::new(true),
                 next_id: AtomicU64::new(1),
                 ui_request_tx,
+                host_config_tx,
                 track_area: Mutex::new(None),
-                shortcut_config_tx,
-                restore_clipboard_tx,
-                quit_tx,
             },
             ui_request_rx,
-            shortcut_config_rx,
-            restore_clipboard_rx,
-            quit_rx,
+            host_config_rx,
         )
     }
 
@@ -158,23 +145,16 @@ impl EventBus {
     }
 
     fn remove_client(&self, id: ClientId) {
-        self.clients.lock().unwrap().remove(&id);
         let mut last_active = self.last_active.lock().unwrap();
+        let mut clients = self.clients.lock().unwrap();
+        clients.remove(&id);
         if *last_active == Some(id) {
-            let remaining = self.clients.lock().unwrap();
-            *last_active = remaining.keys().next().copied();
-            if let Some(sole_id) = *last_active {
-                if remaining.len() == 1 {
-                    drop(remaining);
-                    drop(last_active);
-                    self.mark_active(sole_id);
-                    // Mirrors real APT's server.ts: closing a client while
-                    // exactly one remains re-trusts it as the overlay,
-                    // rather than leaving overlay_active stuck on whatever
-                    // the closed client last reported.
-                    self.set_overlay_active(true);
-                    return;
-                }
+            *last_active = clients.keys().next().copied();
+            // Mirrors real APT's server.ts: closing a client while exactly
+            // one remains re-trusts it as the overlay, rather than leaving
+            // overlay_active stuck on whatever the closed client reported.
+            if clients.len() == 1 {
+                self.set_overlay_active(true);
             }
         }
     }
@@ -233,48 +213,29 @@ impl EventBus {
     fn request_ui(&self, request: UiRequest) {
         let _ = self.ui_request_tx.try_send(request);
     }
-
-    fn request_shortcut_update(&self, actions: Vec<ShortcutAction>) {
-        let _ = self.shortcut_config_tx.try_send(actions);
-    }
-
-    fn request_restore_clipboard_update(&self, value: bool) {
-        let _ = self.restore_clipboard_tx.try_send(value);
-    }
-
-    fn request_quit(&self) {
-        let _ = self.quit_tx.try_send(());
-    }
 }
 
 pub struct Server {
     pub events: Arc<EventBus>,
-    pub config: Arc<ConfigStore>,
     pub logger: Arc<Logger>,
     pub ui_request_rx: async_channel::Receiver<UiRequest>,
-    pub shortcut_config_rx: async_channel::Receiver<Vec<ShortcutAction>>,
-    pub restore_clipboard_rx: async_channel::Receiver<bool>,
-    pub quit_rx: async_channel::Receiver<()>,
+    pub host_config_rx: async_channel::Receiver<ParsedHostConfig>,
 }
 
 pub fn spawn() -> std::io::Result<(u16, Server)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
-    let (event_bus, ui_request_rx, shortcut_config_rx, restore_clipboard_rx, quit_rx) =
-        EventBus::new();
+    let (event_bus, ui_request_rx, host_config_rx) = EventBus::new();
     let events = Arc::new(event_bus);
     started_at_ms();
     let server = Server {
         events: events.clone(),
-        config: Arc::new(ConfigStore::new()),
         logger: Arc::new(Logger::new(events.clone())),
         ui_request_rx,
-        shortcut_config_rx,
-        restore_clipboard_rx,
-        quit_rx,
+        host_config_rx,
     };
-    let config = server.config.clone();
+    let config = Arc::new(ConfigStore::new());
     let logger = server.logger.clone();
 
     std::thread::spawn(move || {
@@ -325,7 +286,29 @@ fn handle_websocket(
     // Bounds how long a queued outgoing message waits for the current
     // blocking read to time out before this thread gets to write it.
     stream.set_read_timeout(Some(Duration::from_millis(15)))?;
-    let mut ws = match tungstenite::accept(stream) {
+    // WebSockets aren't covered by CORS, so without this any web page that
+    // finds our port could drive the overlay (save-config, quit, typing
+    // into PoE via stash-search). The renderer always connects same-origin
+    // (IPC.ts: `${location.host}/events`); a missing Origin is a non-browser
+    // client, which the page-level threat doesn't cover anyway.
+    #[allow(clippy::result_large_err)] // tungstenite's callback signature
+    let same_origin = |req: &tungstenite::handshake::server::Request,
+                       resp: tungstenite::handshake::server::Response| {
+        let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
+        match header("origin") {
+            None => Ok(resp),
+            Some(origin) if header("host").is_some_and(|host| origin == format!("http://{host}")) => {
+                Ok(resp)
+            }
+            Some(origin) => {
+                eprintln!("[server] rejected websocket from origin {origin}");
+                let mut deny = tungstenite::handshake::server::ErrorResponse::new(None);
+                *deny.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
+                Err(deny)
+            }
+        }
+    };
+    let mut ws = match tungstenite::accept_hdr(stream, same_origin) {
         Ok(ws) => ws,
         Err(err) => {
             eprintln!("[server] websocket handshake failed: {err}");
@@ -406,13 +389,12 @@ fn handle_client_event(
                 parsed.shortcuts.len(),
                 parsed.restore_clipboard
             );
-            events.request_shortcut_update(parsed.shortcuts);
-            events.request_restore_clipboard_update(parsed.restore_clipboard);
             crate::kwin_tracker::set_window_title(&parsed.window_title);
+            let _ = events.host_config_tx.try_send(parsed);
         }
         "CLIENT->MAIN::user-action" => {
             match payload.get("action").and_then(Value::as_str) {
-                Some("quit") => events.request_quit(),
+                Some("quit") => events.request_ui(UiRequest::Quit),
                 // The stash-search widget's click path (WidgetStashSearch.vue).
                 Some("stash-search") => {
                     if let Some(text) = payload.get("text").and_then(Value::as_str) {
@@ -472,12 +454,17 @@ fn handle_http(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    let mut stream = stream;
+    if content_length > MAX_BODY_BYTES {
+        return write_response(&mut stream, 413, "text/plain", b"body too large");
+    }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body)?;
     }
 
-    let mut stream = stream;
+    // The proxy forwards the query string; local files never have one.
+    let file_path = path.split('?').next().unwrap_or("");
     if path == "/config" {
         let body = json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -490,14 +477,14 @@ fn handle_http(
     }
 
     if path.starts_with("/uploads/") {
-        return crate::uploads::handle(&mut stream, &method, &path, &body);
+        return crate::uploads::handle(&mut stream, &method, file_path, &body);
     }
 
     if path.starts_with("/proxy/") {
         return crate::proxy::handle(&mut stream, &method, &path, &headers, &body, logger);
     }
 
-    serve_static(&mut stream, &path)
+    serve_static(&mut stream, file_path)
 }
 
 /// Process start time, reported as the updater's `checkedAt` — `0` made the
@@ -513,7 +500,9 @@ fn started_at_ms() -> u64 {
 
 fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
     let path = if path == "/" { "/index.html" } else { path };
-    let file_path: PathBuf = dist_dir().join(path.trim_start_matches('/'));
+    let Some(file_path) = safe_join(dist_dir(), path.trim_start_matches('/')) else {
+        return write_response(stream, 404, "text/plain", b"not found");
+    };
 
     match std::fs::read(&file_path) {
         Ok(bytes) => {
@@ -521,7 +510,11 @@ fn serve_static(stream: &mut TcpStream, path: &str) -> std::io::Result<()> {
                 Some("html") => Some("text/html"),
                 Some("js") => Some("text/javascript"),
                 Some("json") => Some("application/json"),
+                Some("css") => Some("text/css"),
                 Some("svg") => Some("image/svg+xml"),
+                Some("png") => Some("image/png"),
+                Some("woff2") => Some("font/woff2"),
+                Some("wasm") => Some("application/wasm"),
                 _ => None,
             };
             write_response(stream, 200, content_type.unwrap_or(""), &bytes)
@@ -551,6 +544,7 @@ pub(crate) fn write_response_with_headers(
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        413 => "Payload Too Large",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         _ => "Error",
@@ -593,10 +587,51 @@ mod tests {
 
     #[test]
     fn dist_dir_falls_back_to_system_path_without_override() {
-        // .cargo/config.toml sets this for `cargo run`/`cargo test`; clear
-        // it to exercise the no-override path a packaged install hits.
-        // SAFETY: single-threaded test, no other thread reads env vars here.
-        unsafe { std::env::remove_var("APT_KWIN_OVERLAY_DIST") };
-        assert_eq!(dist_dir(), Path::new("/usr/share/apt-kwin-overlay/dist"));
+        assert_eq!(resolve_dist_dir(None), Path::new("/usr/share/apt-kwin-overlay/dist"));
+        assert_eq!(resolve_dist_dir(Some("/x".into())), Path::new("/x"));
+    }
+
+    fn raw_request(port: u16, request: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+    }
+
+    #[test]
+    fn server_rejects_traversal_oversized_bodies_and_cross_origin_websockets() {
+        let (port, _server) = spawn().unwrap();
+        let get = |path: &str| raw_request(port, &format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"));
+        assert!(get("/../../../../etc/passwd").starts_with("HTTP/1.1 404"));
+        assert!(get("/uploads/../../../../etc/passwd").starts_with("HTTP/1.1 404"));
+        let big = raw_request(port, "POST /uploads/a.png HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n");
+        assert!(big.starts_with("HTTP/1.1 413"), "{big}");
+
+        let ws = |origin: &str| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            let host = format!("127.0.0.1:{port}");
+            write!(
+                stream,
+                "GET /events HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+            )
+            .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            line
+        };
+        assert!(ws("https://evil.example").starts_with("HTTP/1.1 403"));
+        assert!(ws(&format!("http://127.0.0.1:{port}")).starts_with("HTTP/1.1 101"));
+    }
+
+    #[test]
+    fn safe_join_rejects_escapes() {
+        let base = Path::new("/srv/dist");
+        assert_eq!(safe_join(base, "assets/a.js"), Some(PathBuf::from("/srv/dist/assets/a.js")));
+        assert_eq!(safe_join(base, "../../etc/passwd"), None);
+        assert_eq!(safe_join(base, "assets/../../x"), None);
+        assert_eq!(safe_join(base, "/etc/passwd"), None);
+        assert_eq!(safe_join(base, "./a"), None);
     }
 }

@@ -13,6 +13,7 @@ use reis::enumflags2::BitFlags as EiBitFlags;
 use reis::event::{DeviceCapability, EiEvent};
 use reis::{ei, event};
 
+use crate::host_config::key_to_evdev;
 use crate::logger::Logger;
 
 // Raw Linux evdev keycodes (linux/input-event-codes.h). notify_keyboard_keycode
@@ -79,81 +80,6 @@ const RESTORE_AFTER_MS: u64 = 120;
 
 fn is_mod_key(key: &str) -> bool {
     matches!(key, "Ctrl" | "Shift" | "Alt")
-}
-
-/// Renderer key name (`ipc/KeyToCode.ts`'s vocabulary, as used in a
-/// `shortcut` string like "Ctrl + D") → evdev keycode.
-fn key_to_evdev(key: &str) -> Option<u32> {
-    const LETTERS: &[u32] = &[
-        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47,
-        17, 45, 21, 44,
-    ];
-    let code = match key {
-        "Ctrl" => 29,
-        "Shift" => 42,
-        "Alt" => 56,
-        "Backspace" => 14,
-        "Tab" => 15,
-        "Enter" => 28,
-        "CapsLock" => 58,
-        "Escape" => 1,
-        "Space" => 57,
-        "PageUp" => 104,
-        "PageDown" => 109,
-        "End" => 107,
-        "Home" => 102,
-        "ArrowLeft" => 105,
-        "ArrowUp" => 103,
-        "ArrowRight" => 106,
-        "ArrowDown" => 108,
-        "Insert" => 110,
-        "Delete" => 111,
-        "0" => 11,
-        "Numpad0" => 82,
-        "Numpad1" => 79,
-        "Numpad2" => 80,
-        "Numpad3" => 81,
-        "Numpad4" => 75,
-        "Numpad5" => 76,
-        "Numpad6" => 77,
-        "Numpad7" => 71,
-        "Numpad8" => 72,
-        "Numpad9" => 73,
-        "NumpadMultiply" => 55,
-        "NumpadAdd" => 78,
-        "NumpadSubtract" => 74,
-        "NumpadDecimal" => 83,
-        "NumpadDivide" => 98,
-        "F11" => 87,
-        "F12" => 88,
-        "Semicolon" => 39,
-        "Equal" => 13,
-        "Comma" => 51,
-        "Minus" => 12,
-        "Period" => 52,
-        "Slash" => 53,
-        "Backquote" => 41,
-        "BracketLeft" => 26,
-        "Backslash" => 43,
-        "BracketRight" => 27,
-        "Quote" => 40,
-        _ => {
-            let mut chars = key.chars();
-            return match (chars.next(), chars.next()) {
-                (Some(c @ 'A'..='Z'), None) => Some(LETTERS[(c as u8 - b'A') as usize]),
-                // KEY_1..KEY_9 = 2..10
-                (Some(c @ '1'..='9'), None) => Some((c as u8 - b'1') as u32 + 2),
-                // F1..F10 = 59..68, F13..F24 = 183..194
-                (Some('F'), Some(_)) => match key[1..].parse::<u32>().ok()? {
-                    n @ 1..=10 => Some(58 + n),
-                    n @ 13..=24 => Some(170 + n),
-                    _ => None,
-                },
-                _ => None,
-            };
-        }
-    };
-    Some(code)
 }
 
 // Ported from HostClipboard.ts's POLL_DELAY/POLL_LIMIT: after pressing
@@ -385,11 +311,9 @@ impl RemoteInput {
                 {
                     Ok(transfers) => transfers,
                     Err(err) => {
-                        let msg = format!(
+                        logger.error(&format!(
                             "[remote_input] failed to listen for clipboard selection transfers: {err}"
-                        );
-                        eprintln!("{msg}");
-                        logger.write(&msg);
+                        ));
                         return;
                     }
                 };
@@ -411,9 +335,7 @@ impl RemoteInput {
                     }
                     .await;
                     if let Err(err) = result {
-                        let msg = format!("[remote_input] clipboard selection-transfer failed: {err}");
-                        eprintln!("{msg}");
-                        logger.write(&msg);
+                        logger.error(&format!("[remote_input] clipboard selection-transfer failed: {err}"));
                     }
                 }
             });
@@ -437,11 +359,9 @@ impl RemoteInput {
                 {
                     Ok(changes) => changes,
                     Err(err) => {
-                        let msg = format!(
+                        logger.error(&format!(
                             "[remote_input] failed to listen for clipboard ownership changes: {err}"
-                        );
-                        eprintln!("{msg}");
-                        logger.write(&msg);
+                        ));
                         return;
                     }
                 };
@@ -500,19 +420,15 @@ impl RemoteInput {
     /// here would silently wedge every future hotkey press until the
     /// process is restarted, not just fail one price-check.
     async fn read_clipboard_once_bounded(&self) -> ashpd::Result<Option<String>> {
-        let read = std::pin::pin!(self.read_clipboard_once());
-        let timeout = std::pin::pin!(async {
-            gtk4::glib::timeout_future(std::time::Duration::from_millis(CLIPBOARD_READ_TIMEOUT_MS))
-                .await;
-            Err(ashpd::Error::IO(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "clipboard selection-read timed out (portal never replied)",
-            )))
-        });
-        match futures_util::future::select(read, timeout).await {
-            futures_util::future::Either::Left((result, _)) => result,
-            futures_util::future::Either::Right((result, _)) => result,
-        }
+        let timeout = std::time::Duration::from_millis(CLIPBOARD_READ_TIMEOUT_MS);
+        crate::with_timeout(timeout, self.read_clipboard_once())
+            .await
+            .unwrap_or_else(|| {
+                Err(ashpd::Error::IO(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "clipboard selection-read timed out (portal never replied)",
+                )))
+            })
     }
 
     /// Skips the read entirely when `clipboard_offers_text` already says the
@@ -570,17 +486,13 @@ impl RemoteInput {
         let previous = match self.read_clipboard_if_offered().await {
             Ok(text) => text,
             Err(err) => {
-                let msg = format!("[remote_input] clipboard pre-read (for staleness check) failed: {err}");
-                eprintln!("{msg}");
-                self.logger.write(&msg);
+                self.logger.error(&format!("[remote_input] clipboard pre-read (for staleness check) failed: {err}"));
                 None
             }
         };
 
         if let Err(err) = self.write_clipboard_text("").await {
-            let msg = format!("[remote_input] clipboard pre-clear failed: {err}");
-            eprintln!("{msg}");
-            self.logger.write(&msg);
+            self.logger.error(&format!("[remote_input] clipboard pre-clear failed: {err}"));
             // Keep going -- polling can still work, just with a higher risk
             // of the stale-content race this clear exists to prevent.
         }
@@ -598,9 +510,7 @@ impl RemoteInput {
             let text = match self.read_clipboard_if_offered().await {
                 Ok(text) => text,
                 Err(err) => {
-                    let msg = format!("[remote_input] clipboard poll read failed: {err}");
-                    eprintln!("{msg}");
-                    self.logger.write(&msg);
+                    self.logger.error(&format!("[remote_input] clipboard poll read failed: {err}"));
                     None
                 }
             };
@@ -626,9 +536,7 @@ impl RemoteInput {
                 _ => "",
             };
             if let Err(err) = self.write_clipboard_text(restore_value).await {
-                let msg = format!("[remote_input] clipboard restore failed: {err}");
-                eprintln!("{msg}");
-                self.logger.write(&msg);
+                self.logger.error(&format!("[remote_input] clipboard restore failed: {err}"));
             }
         }
 
@@ -647,7 +555,7 @@ impl RemoteInput {
         self.clipboard
             .set_selection(
                 &self.session,
-                SetSelectionOptions::default().set_mime_types(&["text/plain;charset=utf-8"]),
+                SetSelectionOptions::default().set_mime_types(&[CLIPBOARD_TEXT_MIME]),
             )
             .await
     }
@@ -684,9 +592,7 @@ impl RemoteInput {
             None
         };
         if let Err(err) = self.write_clipboard_text(clip).await {
-            let msg = format!("[remote_input] paste: clipboard write failed: {err}");
-            eprintln!("{msg}");
-            self.logger.write(&msg);
+            self.logger.error(&format!("[remote_input] paste: clipboard write failed: {err}"));
             return;
         }
 
@@ -709,9 +615,7 @@ impl RemoteInput {
         if restore
             && let Err(err) = self.write_clipboard_text(saved.as_deref().unwrap_or("")).await
         {
-            let msg = format!("[remote_input] paste: clipboard restore failed: {err}");
-            eprintln!("{msg}");
-            self.logger.write(&msg);
+            self.logger.error(&format!("[remote_input] paste: clipboard restore failed: {err}"));
         }
     }
 
@@ -762,9 +666,7 @@ impl RemoteInput {
     fn press_keys(&self, keys: &[(u32, ei::keyboard::KeyState)]) {
         let handle = self.keyboard.borrow();
         let Some(handle) = handle.as_ref() else {
-            let msg = "[remote_input] keyboard device not ready yet";
-            eprintln!("{msg}");
-            self.logger.write(msg);
+            self.logger.error("[remote_input] keyboard device not ready yet");
             return;
         };
 
@@ -817,20 +719,6 @@ mod tests {
         for (_, key) in chat_sequence("x", true).1.iter().chain(STASH_SEARCH_TAPS) {
             assert!(key_to_evdev(key).is_some(), "{key}");
         }
-    }
-
-    #[test]
-    fn key_to_evdev_matches_input_event_codes() {
-        let cases = [
-            ("A", 30), ("C", 46), ("D", 32), ("Z", 44), ("1", 2), ("9", 10), ("0", 11),
-            ("F1", 59), ("F10", 68), ("F11", 87), ("F13", 183), ("F24", 194),
-            ("Ctrl", 29), ("Space", 57), ("Numpad0", 82),
-        ];
-        for (key, code) in cases {
-            assert_eq!(key_to_evdev(key), Some(code), "{key}");
-        }
-        assert_eq!(key_to_evdev("F25"), None);
-        assert_eq!(key_to_evdev(""), None);
     }
 
     #[test]

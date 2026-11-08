@@ -13,6 +13,7 @@ mod xdg;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gtk4::cairo::Region;
 use gtk4::prelude::*;
@@ -166,6 +167,123 @@ fn main() -> glib::ExitCode {
     app.run()
 }
 
+/// GTK-main-thread state shared by the hotkey loop, the focus tracker, the
+/// renderer's UI requests and the local key handler. Lives for the whole
+/// process behind one `Rc`.
+pub(crate) struct Overlay {
+    pub window: ApplicationWindow,
+    pub events: Arc<server::EventBus>,
+    pub logger: Arc<logger::Logger>,
+    /// Starts true: read from the moment the app starts, before the
+    /// deferred idle callback in `build_ui` applies it to the surface.
+    pub click_through: Cell<bool>,
+    /// Host-side price-check popup bookkeeping.
+    pub price_check_open: Cell<bool>,
+    pub price_check_locked: Cell<bool>,
+    /// The renderer's `restoreClipboard` setting.
+    pub restore_clipboard: Cell<bool>,
+    /// Bumped to cancel `shortcuts::spawn_auto_close`'s poll loop
+    /// (WidgetAreaTracker's removeListeners).
+    pub auto_close_gen: Cell<u64>,
+    /// Last externally focused window (our own surface's activations are
+    /// filtered out).
+    pub active_window: RefCell<Option<kwin_tracker::WindowEvent>>,
+    kwin_connection: RefCell<Option<zbus::Connection>>,
+    remote_input: RefCell<Option<Rc<remote_input::RemoteInput>>>,
+}
+
+impl Overlay {
+    pub fn kwin(&self) -> Option<zbus::Connection> {
+        self.kwin_connection.borrow().clone()
+    }
+
+    /// Cloned out so callers never hold a `RefCell` borrow across an await.
+    pub fn remote(&self) -> Option<Rc<remote_input::RemoteInput>> {
+        self.remote_input.borrow().clone()
+    }
+
+    pub fn poe_active(&self) -> bool {
+        self.active_window
+            .borrow()
+            .as_ref()
+            .is_some_and(kwin_tracker::WindowEvent::is_path_of_exile)
+    }
+
+    pub fn toggle_click_through(&self) {
+        self.set_click_through(!self.click_through.get());
+    }
+
+    /// `can-target` only affects GTK's own internal hit-testing, not the
+    /// input region the compositor is told about — that requires poking the
+    /// surface directly, or clicks keep landing on our window no matter what.
+    pub fn set_click_through(&self, now_click_through: bool) {
+        if self.click_through.get() == now_click_through {
+            return;
+        }
+        self.click_through.set(now_click_through);
+        apply_click_through_to_surface(now_click_through, &self.window);
+
+        // The renderer only auto-hides "hide-on-blur" popups (e.g. the
+        // price-check window) in reaction to this event
+        // (renderer/src/web/overlay/OverlayWindow.vue). click-through ON
+        // maps to "overlay not active", OFF to "overlay active".
+        self.events.broadcast(
+            "MAIN->OVERLAY::focus-change",
+            serde_json::json!({
+                "game": now_click_through,
+                "overlay": !now_click_through,
+                "usingHotkey": true,
+            }),
+        );
+    }
+
+    pub fn hide_price_check(&self) {
+        self.events
+            .broadcast("MAIN->OVERLAY::hide-exclusive-widget", serde_json::Value::Null);
+        self.price_check_open.set(false);
+    }
+
+    /// Force click-through back on and close any open overlay widgets, as an
+    /// always-available safety hatch regardless of what's currently showing.
+    /// Matches real APT's `assertGameActive` (main/src/windowing/OverlayWindow.ts).
+    pub async fn close_all_ui(&self) {
+        println!(
+            "[main] close_all_ui: price_check_open={}, price_check_locked={}, click_through was {}",
+            self.price_check_open.get(),
+            self.price_check_locked.get(),
+            self.click_through.get()
+        );
+        if self.price_check_open.get() {
+            self.hide_price_check();
+        }
+        self.price_check_locked.set(false);
+        self.set_click_through(true);
+
+        // Restoring click-through doesn't hand OS focus back to PoE on its
+        // own (see activate_path_of_exile). Best-effort: a failure just
+        // means the user clicks the game once more themselves.
+        if let Some(connection) = self.kwin()
+            && let Err(err) = kwin_tracker::activate_path_of_exile(&connection).await
+        {
+            eprintln!("[main] failed to re-activate Path of Exile: {err}");
+        }
+    }
+}
+
+/// `None` if `fut` didn't finish within `duration`. For awaits on the GTK
+/// main thread that must not hang the hotkey loop (AGENTS.md).
+pub(crate) async fn with_timeout<F: std::future::Future>(
+    duration: std::time::Duration,
+    fut: F,
+) -> Option<F::Output> {
+    let fut = std::pin::pin!(fut);
+    let timer = std::pin::pin!(glib::timeout_future(duration));
+    match futures_util::future::select(fut, timer).await {
+        futures_util::future::Either::Left((value, _)) => Some(value),
+        futures_util::future::Either::Right(_) => None,
+    }
+}
+
 fn build_ui(app: &Application) {
     // Single instance (real main.ts's requestSingleInstanceLock): GApplication
     // is already unique per APP_ID over D-Bus — a second launch just asks
@@ -189,17 +307,13 @@ fn build_ui(app: &Application) {
     window.set_exclusive_zone(-1);
     // Starting mode: never steal focus from the game while click-through is
     // on. apply_click_through_to_surface flips this to OnDemand whenever
-    // click-through goes off, so clicking into a text field in our own UI
-    // (e.g. typing in settings) actually reaches it instead of the game —
-    // without that, mouse clicks land correctly (input region opens up) but
-    // every keypress still goes to whatever holds keyboard focus, which was
-    // always the game since this was never changed after startup.
+    // click-through goes off, so keypresses into our own UI (e.g. typing in
+    // settings) reach it instead of the game.
     //
-    // Confirmed via testing: a layer-shell surface that never holds keyboard
-    // focus also can't reliably read gdk::Clipboard (Wayland gates clipboard
-    // visibility by focus for privacy) — irrelevant here since price-check
-    // clipboard reads go through the portal's Clipboard interface instead
-    // (remote_input.rs), which works regardless of local focus.
+    // A layer-shell surface that never holds keyboard focus also can't
+    // reliably read gdk::Clipboard (Wayland gates it by focus) — irrelevant
+    // here since price-check reads go through the portal's Clipboard
+    // interface instead (remote_input.rs).
     window.set_keyboard_mode(KeyboardMode::None);
 
     let (port, backend) = match server::spawn() {
@@ -245,15 +359,6 @@ fn build_ui(app: &Application) {
             }
         });
     }
-    {
-        let app = app.clone();
-        let quit_rx = backend.quit_rx.clone();
-        glib::spawn_future_local(async move {
-            if quit_rx.recv().await.is_ok() {
-                app.quit();
-            }
-        });
-    }
 
     let user_content = webkit6::UserContentManager::new();
     user_content.add_script(&webkit6::UserScript::new(
@@ -267,8 +372,7 @@ fn build_ui(app: &Application) {
     webview.set_background_color(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
     // The renderer only enables overlay-mode behavior (vs. plain-browser
     // mode) when navigator.userAgent contains "Electron"
-    // (renderer/src/web/background/IPC.ts) — we're WebKitGTK, not Electron,
-    // so without this it would silently fall back to browser mode.
+    // (renderer/src/web/background/IPC.ts).
     if let Some(settings) = webkit6::prelude::WebViewExt::settings(&webview) {
         let ua = settings
             .user_agent()
@@ -276,22 +380,15 @@ fn build_ui(app: &Application) {
             .unwrap_or_default();
         settings.set_user_agent(Some(&format!("{ua} Electron/32.0.0")));
 
-        // Confirmed via testing: this is WebKit's own default already (not
-        // the bottleneck behind observed UI lag, which traced instead to
-        // kwin_tracker.rs hammering KWin's scripting D-Bus interface — see
-        // shortcuts.rs's spawn_auto_close). Set explicitly anyway so this
-        // doesn't silently regress if a future WebKitGTK version changes
-        // its default.
+        // Already WebKit's default; set explicitly so a future WebKitGTK
+        // default change can't silently regress rendering performance.
         settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Always);
     }
     // The renderer opens external links (e.g. the price-check popup's
     // "Trade" button, TradeLinks.vue) with plain `window.open(url)`. Real
-    // Electron intercepts that via `setWindowOpenHandler` and hands it to
-    // `shell.openExternal` (main/src/windowing/OverlayWindow.ts) instead of
-    // letting Electron create a popup window. WebKitGTK's equivalent hook is
-    // the "create" signal -- left unconnected, `window.open()` just does
-    // nothing observable. Mirror Electron: launch the user's default
-    // browser and return None so WebKit never creates an in-app popup.
+    // Electron hands that to `shell.openExternal` (OverlayWindow.ts's
+    // setWindowOpenHandler); WebKitGTK's equivalent is the "create" signal.
+    // Launch the default browser and return None so no in-app popup opens.
     webview.connect_create(|_view, navigation_action| {
         if let Some(uri) = navigation_action.request().and_then(|req| req.uri())
             && let Err(err) =
@@ -303,18 +400,6 @@ fn build_ui(app: &Application) {
     });
 
     webview.load_uri(&format!("http://127.0.0.1:{port}/"));
-
-    // Starts true (not false-then-flipped): other logic reads this Cell
-    // from the moment the app starts, before the deferred idle callback
-    // below has had a chance to run.
-    let click_through = Rc::new(Cell::new(true));
-    // Host-side price-check popup bookkeeping, hoisted out of
-    // shortcuts::spawn (which used to own them locally) so the
-    // kwin_tracker::Activated handler below can also reset them via
-    // shortcuts::close_all_ui when PoE regains focus.
-    let price_check_open = Rc::new(Cell::new(false));
-    let price_check_locked = Rc::new(Cell::new(false));
-
     window.set_child(Some(&webview));
 
     // Transparent CSS background so the layer surface itself doesn't paint opaque.
@@ -327,8 +412,8 @@ fn build_ui(app: &Application) {
     );
 
     window.present();
-    // click_through's tracked state already defaults to true (see above);
-    // this just applies that to the actual surface once layout has happened.
+    // Applies click_through's initial `true` to the surface once layout
+    // has happened.
     {
         let window = window.clone();
         glib::idle_add_local_once(move || {
@@ -336,61 +421,77 @@ fn build_ui(app: &Application) {
         });
     }
 
-    let active_window: Rc<RefCell<Option<kwin_tracker::WindowEvent>>> = Rc::new(RefCell::new(None));
+    let overlay = Rc::new(Overlay {
+        window: window.clone(),
+        events: backend.events.clone(),
+        logger: backend.logger.clone(),
+        click_through: Cell::new(true),
+        price_check_open: Cell::new(false),
+        price_check_locked: Cell::new(false),
+        restore_clipboard: Cell::new(false),
+        auto_close_gen: Cell::new(0),
+        active_window: RefCell::new(None),
+        kwin_connection: RefCell::new(None),
+        remote_input: RefCell::new(None),
+    });
+
+    // Renderer requests (server.rs's UiRequest).
+    {
+        let app = app.clone();
+        let overlay = overlay.clone();
+        let ui_request_rx = backend.ui_request_rx.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(request) = ui_request_rx.recv().await {
+                match request {
+                    server::UiRequest::Quit => app.quit(),
+                    // The renderer's title-bar "x" sends focus-game instead
+                    // of hiding itself locally (OverlayWindow.ts).
+                    server::UiRequest::FocusGame => overlay.close_all_ui().await,
+                    // text-box.ts's stashSearch hands focus back to the game
+                    // before typing into it.
+                    server::UiRequest::StashSearch(text) => {
+                        overlay.close_all_ui().await;
+                        let action = host_config::ActionKind::StashSearch { text };
+                        shortcuts::paste_action(&overlay, &action, "").await;
+                    }
+                }
+            }
+        });
+    }
+
     let (sender, receiver) = async_channel::unbounded::<TrackerEvent>();
     let conn_rx = kwin_tracker::spawn(sender);
-
-    let kwin_connection: Rc<RefCell<Option<zbus::Connection>>> = Rc::new(RefCell::new(None));
     {
-        let kwin_connection = kwin_connection.clone();
+        let overlay = overlay.clone();
         glib::spawn_future_local(async move {
             if let Ok(connection) = conn_rx.recv().await {
-                kwin_connection.replace(Some(connection));
+                overlay.kwin_connection.replace(Some(connection));
             }
         });
     }
 
     {
-        let active_window = active_window.clone();
-        let window = window.clone();
-        let click_through_for_monitor = click_through.clone();
-        let events_for_tracker = backend.events.clone();
-        let price_check_open_for_tracker = price_check_open.clone();
-        let price_check_locked_for_tracker = price_check_locked.clone();
-        let kwin_connection_for_tracker = kwin_connection.clone();
+        let overlay = overlay.clone();
         let mut attached = false;
         glib::spawn_future_local(async move {
             while let Ok(event) = receiver.recv().await {
                 match event {
                     TrackerEvent::Activated(w) => {
                         // Our own layer-shell surface gets a genuine
-                        // window-activation event the moment it becomes
-                        // keyboard-interactive (e.g. opening a locked
-                        // price-check popup flips KeyboardMode to OnDemand) —
-                        // confirmed live, this fires without the user even
-                        // clicking anything. Ignore it entirely: it isn't a
-                        // real "user switched to another app" event, and
-                        // letting it overwrite `active_window` was making
-                        // price_check's is_poe guard (below, via
-                        // shortcuts::price_check) wrongly reject every hotkey
-                        // press until PoE happened to get a fresh, real
-                        // activation of its own — e.g. right after opening a
-                        // locked popup and clicking the background to close
-                        // it, both Ctrl+D and Ctrl+Alt+D would silently do
-                        // nothing.
+                        // activation the moment it becomes keyboard-
+                        // interactive (e.g. a locked price-check popup flips
+                        // KeyboardMode to OnDemand). Recording it as
+                        // `active_window` made every later hotkey's is-PoE
+                        // check fail until PoE was re-activated for real.
                         if w.is_own_process() {
                             continue;
                         }
-                        // Layer-shell surfaces with no explicit monitor set
-                        // just go wherever the compositor's default output
-                        // is — which isn't necessarily where the game
-                        // actually is on a multi-monitor setup. Follow PoE.
                         if w.is_path_of_exile() {
                             println!(
                                 "[kwin_tracker] activated: class={:?} caption={:?} pid={} {}x{} @ ({}, {})",
                                 w.class_name, w.caption, w.pid, w.width, w.height, w.x, w.y
                             );
-                            move_overlay_to_window_monitor(&window, &w, &click_through_for_monitor);
+                            move_overlay_to_window_monitor(&overlay, &w);
                             // Real APT sends this when electron-overlay-window
                             // first attaches to PoE; drives the renderer's
                             // "overlay ready" toast (LoadingAnimation.vue).
@@ -398,33 +499,23 @@ fn build_ui(app: &Application) {
                             // aren't detected, so no re-toast on relaunch.
                             if !attached {
                                 attached = true;
-                                events_for_tracker
+                                overlay
+                                    .events
                                     .broadcast("MAIN->OVERLAY::overlay-attached", serde_json::Value::Null);
                             }
                             // Mirrors real APT's handlePoeWindowActiveChange:
-                            // PoE *regaining* focus forces any
-                            // locked/interactive overlay state back to
-                            // click-through, the same path the renderer's
-                            // own title-bar close button already uses.
-                            if !click_through_for_monitor.get() {
-                                shortcuts::close_all_ui(
-                                    &window,
-                                    &click_through_for_monitor,
-                                    &events_for_tracker,
-                                    &price_check_open_for_tracker,
-                                    &price_check_locked_for_tracker,
-                                    &kwin_connection_for_tracker,
-                                )
-                                .await;
+                            // PoE *regaining* focus forces any interactive
+                            // overlay state back to click-through.
+                            if !overlay.click_through.get() {
+                                overlay.close_all_ui().await;
                             }
-                        }
-                        if !w.is_path_of_exile() {
+                        } else {
                             println!(
                                 "[kwin_tracker] activated (not PoE): class={:?} caption={:?} pid={}",
                                 w.class_name, w.caption, w.pid
                             );
                         }
-                        active_window.replace(Some(w));
+                        overlay.active_window.replace(Some(w));
                     }
                     TrackerEvent::GeometryChanged(w) => {
                         if w.is_path_of_exile() {
@@ -441,17 +532,9 @@ fn build_ui(app: &Application) {
 
     // Local Escape/Ctrl+W handling, mirroring real APT's OverlayWindow.ts
     // handleExtraCommands: only fires while our surface holds keyboard focus
-    // (KeyboardMode::OnDemand, i.e. click-through off) — a different mechanism
-    // than the global-grab approach removed in df5aec9 (no portal session
-    // involved), now viable since d749d98 made local focus real.
+    // (KeyboardMode::OnDemand, i.e. click-through off).
     {
-        let window_for_keys = window.clone();
-        let click_through_for_keys = click_through.clone();
-        let events_for_keys = backend.events.clone();
-        let price_check_open_for_keys = price_check_open.clone();
-        let price_check_locked_for_keys = price_check_locked.clone();
-        let kwin_connection_for_keys = kwin_connection.clone();
-
+        let overlay = overlay.clone();
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         key_controller.connect_key_pressed(move |_, key, _, modifiers| {
@@ -461,144 +544,51 @@ fn build_ui(app: &Application) {
             if !is_escape && !is_ctrl_w {
                 return glib::Propagation::Proceed;
             }
-            let window = window_for_keys.clone();
-            let click_through = click_through_for_keys.clone();
-            let events = events_for_keys.clone();
-            let price_check_open = price_check_open_for_keys.clone();
-            let price_check_locked = price_check_locked_for_keys.clone();
-            let kwin_connection = kwin_connection_for_keys.clone();
-            glib::spawn_future_local(async move {
-                shortcuts::close_all_ui(
-                    &window,
-                    &click_through,
-                    &events,
-                    &price_check_open,
-                    &price_check_locked,
-                    &kwin_connection,
-                )
-                .await;
-            });
+            let overlay = overlay.clone();
+            glib::spawn_future_local(async move { overlay.close_all_ui().await });
             glib::Propagation::Stop
         });
         window.add_controller(key_controller);
     }
 
-    let remote_input: Rc<RefCell<Option<remote_input::RemoteInput>>> = Rc::new(RefCell::new(None));
     {
-        let window = window.clone();
-        let click_through = click_through.clone();
-        let kwin_connection = kwin_connection.clone();
-        let remote_input = remote_input.clone();
-        let events = backend.events.clone();
-        let logger = backend.logger.clone();
-        let active_window = active_window.clone();
-        let ui_request_rx = backend.ui_request_rx.clone();
-        let shortcut_config_rx = backend.shortcut_config_rx.clone();
-        let restore_clipboard_rx = backend.restore_clipboard_rx.clone();
-        let price_check_open = price_check_open.clone();
-        let price_check_locked = price_check_locked.clone();
-        let visibility =
-            overlay_visibility::OverlayVisibility::new(events.clone(), click_through.clone());
+        let host_config_rx = backend.host_config_rx.clone();
         glib::spawn_future_local(async move {
             // Launched from a terminal (no systemd app-scope), so the portal
             // can't derive our app id on its own — register it explicitly
             // first, once, or every app-id-gated portal call (GlobalShortcuts,
             // RemoteDesktop) fails with "An app id is required". The portal
-            // errors if this is called twice, so it happens exactly once here
-            // rather than inside shortcuts.rs or remote_input.rs.
+            // errors if this is called twice, so it happens exactly once here.
             if let Err(err) = ashpd::register_host_app(APP_ID.try_into().unwrap()).await {
-                let msg = format!("[main] failed to register host app: {err}");
-                eprintln!("{msg}");
-                logger.write(&msg);
+                overlay.logger.error(&format!("[main] failed to register host app: {err}"));
                 return;
             }
 
-            match remote_input::RemoteInput::setup(logger.clone(), move |depressed| {
+            let visibility = overlay_visibility::OverlayVisibility::new(overlay.clone());
+            match remote_input::RemoteInput::setup(overlay.logger.clone(), move |depressed| {
                 visibility.on_modifiers(depressed)
             })
             .await
             {
                 Ok(ri) => {
-                    remote_input.replace(Some(ri));
+                    overlay.remote_input.replace(Some(Rc::new(ri)));
                 }
-                Err(err) => {
-                    let msg = format!("[main] remote_input setup failed: {err}");
-                    eprintln!("{msg}");
-                    logger.write(&msg);
-                }
+                Err(err) => overlay.logger.error(&format!("[main] remote_input setup failed: {err}")),
             }
 
-            shortcuts::spawn(
-                window,
-                click_through,
-                kwin_connection,
-                remote_input,
-                events,
-                logger,
-                active_window,
-                ui_request_rx,
-                shortcut_config_rx,
-                restore_clipboard_rx,
-                price_check_open,
-                price_check_locked,
-            );
+            shortcuts::spawn(overlay, host_config_rx);
         });
     }
-}
-
-/// `can-target` only affects GTK's own internal hit-testing, not the input
-/// region the compositor is told about — that requires poking the surface
-/// directly, or clicks keep landing on our window no matter what.
-fn toggle_click_through(
-    window: &ApplicationWindow,
-    click_through: &Rc<Cell<bool>>,
-    events: &server::EventBus,
-) {
-    set_click_through(!click_through.get(), window, click_through, events);
-}
-
-/// Like `toggle_click_through`, but sets an absolute state rather than
-/// flipping — needed by anything that decides the *desired* state itself
-/// (e.g. `widget_area_tracker`'s mouse-distance logic) rather than reacting
-/// to a keypress.
-pub(crate) fn set_click_through(
-    now_click_through: bool,
-    window: &ApplicationWindow,
-    click_through: &Rc<Cell<bool>>,
-    events: &server::EventBus,
-) {
-    if click_through.get() == now_click_through {
-        return;
-    }
-    click_through.set(now_click_through);
-    apply_click_through_to_surface(now_click_through, window);
-
-    // The renderer only auto-hides "hide-on-blur" popups (e.g. the
-    // price-check window) in reaction to this event
-    // (renderer/src/web/overlay/OverlayWindow.vue) — without it, anything
-    // shown via item-text just stays on screen forever. click-through ON
-    // maps to "overlay not active" (game usable, so any lingering popup
-    // should go away); click-through OFF maps to "overlay active".
-    events.broadcast(
-        "MAIN->OVERLAY::focus-change",
-        serde_json::json!({
-            "game": now_click_through,
-            "overlay": !now_click_through,
-            "usingHotkey": true,
-        }),
-    );
 }
 
 /// Applies `now_click_through` to the surface's actual Wayland input region,
 /// unconditionally — split out of `set_click_through` so callers that need
 /// to force a re-apply (the surface was remapped and may have silently
-/// dropped its input region) can do so without `set_click_through`'s
-/// early-return-if-state-unchanged guard getting in the way.
+/// dropped its input region) can bypass its unchanged-state early return.
 fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationWindow) {
     // OnDemand lets the compositor give this surface keyboard focus when
     // something in it is clicked (e.g. a text field), without us stealing
-    // focus from the game while click-through is on and nothing of ours is
-    // meant to be interactive.
+    // focus from the game while click-through is on.
     window.set_keyboard_mode(if now_click_through {
         KeyboardMode::None
     } else {
@@ -617,20 +607,12 @@ fn apply_click_through_to_surface(now_click_through: bool, window: &ApplicationW
 
 /// A layer-shell surface with no explicit monitor set just lands on
 /// whatever output the compositor considers default — not necessarily
-/// where the game actually is on a multi-monitor setup. gtk4-layer-shell
-/// supports changing this on an already-mapped surface, but its own docs
-/// warn it "gets remapped so the change can take effect" — that remap was
-/// silently resetting the Wayland input region set for click-through,
-/// leaving the overlay fully click-blocking after every monitor switch even
-/// though our tracked state still said click-through was on. Re-applying
-/// the input region right after fixes it; deferred to idle so the remap
-/// (which isn't necessarily synchronous with `set_monitor()` returning) has
-/// actually landed first.
-fn move_overlay_to_window_monitor(
-    window: &ApplicationWindow,
-    target: &kwin_tracker::WindowEvent,
-    click_through: &Rc<Cell<bool>>,
-) {
+/// where the game is on a multi-monitor setup. Changing the monitor remaps
+/// the surface, which silently resets the click-through input region, so it
+/// is re-applied afterwards; deferred to idle so the remap (not necessarily
+/// synchronous with `set_monitor()`) has landed first.
+fn move_overlay_to_window_monitor(overlay: &Rc<Overlay>, target: &kwin_tracker::WindowEvent) {
+    let window = &overlay.window;
     let display = WidgetExt::display(window);
     let center_x = target.x + target.width / 2.0;
     let center_y = target.y + target.height / 2.0;
@@ -655,10 +637,9 @@ fn move_overlay_to_window_monitor(
                 println!("[main] moving overlay to PoE's monitor");
                 window.set_monitor(Some(&monitor));
 
-                let window = window.clone();
-                let click_through = click_through.clone();
+                let overlay = overlay.clone();
                 glib::idle_add_local_once(move || {
-                    apply_click_through_to_surface(click_through.get(), &window);
+                    apply_click_through_to_surface(overlay.click_through.get(), &overlay.window);
                 });
             }
             return;

@@ -44,7 +44,17 @@ pub fn handle(
     }
 
     let url = format!("https://{rest}");
-    let agent = ureq::Agent::new_with_defaults();
+    // One shared agent so requests reuse connections instead of a fresh TLS
+    // handshake per price check. 4xx/5xx are passed through as responses,
+    // not errors: the renderer needs GGG's real status (429) and its
+    // rate-limit headers, not a generic 502.
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into()
+    });
     let forwarded_headers: Vec<(&str, &str)> = headers
         .iter()
         .filter(|(key, _)| !key.starts_with("sec-") && !STRIPPED_REQUEST_HEADERS.contains(&key.as_str()))
@@ -98,9 +108,7 @@ pub fn handle(
             write_response_with_headers(stream, status, &content_type, &rate_limit_headers, &bytes)
         }
         Err(err) => {
-            let msg = format!("[proxy] request to {host} failed: {err}");
-            eprintln!("{msg}");
-            logger.write(&msg);
+            logger.error(&format!("[proxy] request to {host} failed: {err}"));
             write_response(stream, 502, "text/plain", b"proxy error")
         }
     }
