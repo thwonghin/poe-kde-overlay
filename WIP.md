@@ -45,7 +45,7 @@ From a full read of `src/` plus CI/packaging (2026-11-07). Fixed so far:
   - (docs) Dropped "500ms KWin script timeout is a guess": cursor queries measure
     1.0ms median, 1.8ms max (50 queries against a live KWin), so 500ms is
     over 250× headroom.
-- **PLACEHOLDER** Tests and CI:
+- **`9b13a5d`:** Tests and CI:
   - `tests/upstream_contract.rs` fails if an IPC event name `src/` uses
     (scanned from string literals), a payload field, a Settings-banner
     i18n key or its English text, or the PriceCheckWindow.vue track-area
