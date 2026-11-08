@@ -51,9 +51,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.npm
-          key: npm-${{ hashFiles('vendor/awakened-poe-trade/renderer/package-lock.json') }}
+          key: npm-${{ hashFiles('vendor/*/renderer/package-lock.json') }}
 
-      - name: Build renderer (vendored, unmodified Vue UI)
+      - name: Build renderers (both vendored, unmodified Vue UIs)
         run: ./scripts/build-renderer.sh
 
       - name: Build backend

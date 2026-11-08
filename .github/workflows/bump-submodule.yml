@@ -1,9 +1,11 @@
 name: Bump submodule
 
 # GitHub Actions has no way to subscribe to push events on a third-party
-# repo (that would require SnosMe/awakened-poe-trade to configure a
-# webhook pointing at us), so this polls on a schedule instead -- the same
-# approach Renovate/Dependabot use for tracking upstreams they don't own.
+# repo (that would require SnosMe/awakened-poe-trade or
+# kvan7/Exiled-Exchange-2 to configure a webhook pointing at us), so this
+# polls on a schedule instead -- the same approach Renovate/Dependabot use
+# for tracking upstreams they don't own. Each vendor (poe1 and poe2
+# renderer) gets its own bump PR.
 on:
   schedule:
     - cron: '0 3 * * *'
@@ -25,26 +27,34 @@ jobs:
     # can run daily for free regardless of whether anything changed.
     runs-on: ubuntu-latest
     outputs:
-      changed: ${{ steps.diff.outputs.changed }}
+      vendors: ${{ steps.diff.outputs.vendors }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: false
 
-      - name: Compare upstream HEAD to pinned commit
+      # JSON list of vendors whose upstream HEAD moved, for the matrix below.
+      - name: Compare each upstream HEAD to its pinned commit
         id: diff
         run: |
-          upstream=$(git ls-remote https://github.com/SnosMe/awakened-poe-trade.git HEAD | cut -f1)
-          pinned=$(git rev-parse HEAD:vendor/awakened-poe-trade)
-          if [ "$upstream" != "$pinned" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+          changed=()
+          for vendor in $(git config -f .gitmodules --get-regexp '\.path$' | cut -d' ' -f2 | xargs -n1 basename); do
+            url=$(git config -f .gitmodules "submodule.vendor/$vendor.url")
+            upstream=$(git ls-remote "$url" HEAD | cut -f1)
+            pinned=$(git rev-parse "HEAD:vendor/$vendor")
+            if [ "$upstream" != "$pinned" ]; then
+              changed+=("\"$vendor\"")
+            fi
+          done
+          echo "vendors=[$(IFS=,; echo "${changed[*]}")]" >> "$GITHUB_OUTPUT"
 
   bump-and-build:
     needs: check
-    if: needs.check.outputs.changed == 'true'
+    if: needs.check.outputs.vendors != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        vendor: ${{ fromJSON(needs.check.outputs.vendors) }}
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
@@ -66,10 +76,10 @@ jobs:
 
       - name: Record currently-pinned commit
         id: pinned
-        run: echo "sha=$(git rev-parse HEAD:vendor/awakened-poe-trade)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git rev-parse HEAD:vendor/${{ matrix.vendor }})" >> "$GITHUB_OUTPUT"
 
       - name: Bump submodule to upstream HEAD
-        run: git submodule update --remote vendor/awakened-poe-trade
+        run: git submodule update --remote vendor/${{ matrix.vendor }}
 
       - name: Detect vendor contract-surface changes
         id: contract
@@ -82,14 +92,14 @@ jobs:
           # regardless of upstream changes (AppUpdater.ts:
           # stubbed, doesn't apply to a locally-built binary; vision/**:
           # Windows-only OCR).
-          changed=$(git -C vendor/awakened-poe-trade diff --name-only \
+          changed=$(git -C vendor/${{ matrix.vendor }} diff --name-only \
             "${{ steps.pinned.outputs.sha }}" HEAD -- 'main/src' 'ipc' \
             ':!main/src/AppUpdater.ts' ':!main/src/vision')
 
           if [ -n "$changed" ]; then
-            echo "title=⚠️ Bump awakened-poe-trade submodule (contract files changed — review needed)" >> "$GITHUB_OUTPUT"
+            echo "title=⚠️ Bump ${{ matrix.vendor }} submodule (contract files changed — review needed)" >> "$GITHUB_OUTPUT"
           else
-            echo "title=Bump awakened-poe-trade submodule" >> "$GITHUB_OUTPUT"
+            echo "title=Bump ${{ matrix.vendor }} submodule" >> "$GITHUB_OUTPUT"
           fi
 
           {
@@ -98,7 +108,7 @@ jobs:
             if [ -n "$changed" ]; then
               echo ""
               echo "### ⚠️ Vendor contract surface changed"
-              echo "This bump touches upstream file(s) that \`src/*.rs\` reimplements (see README.md's module table). \`cargo test\` checks the IPC message and config types; it does not check ported behavior (e.g. Shortcuts.ts, ConfigStore.ts logic) or allowlists (proxy hosts). Diff the file(s) below against the corresponding \`src/*.rs\` module before merging:"
+              echo "This bump touches upstream file(s) that \`src/*.rs\` reimplements (see README.md's module table). \`cargo test\` checks the IPC message and config types; it does not check ported behavior (e.g. Shortcuts.ts, ConfigStore.ts logic) or allowlists beyond the drift-tested ones (proxy hosts, item-text signatures). Diff the file(s) below against the corresponding \`src/*.rs\` module before merging:"
               echo ""
               while IFS= read -r f; do
                 echo "- \`$f\`"
@@ -117,7 +127,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
-          key: npm-${{ hashFiles('vendor/awakened-poe-trade/renderer/package-lock.json') }}
+          key: npm-${{ hashFiles('vendor/*/renderer/package-lock.json') }}
 
       # Validate the bumped commit actually builds before proposing it --
       # deliberately duplicated from ci.yml rather than factored into a
@@ -142,10 +152,10 @@ jobs:
       - name: Open PR
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          commit-message: "chore: bump awakened-poe-trade submodule"
-          branch: bump-awakened-poe-trade
-          title: ${{ steps.test.outcome == 'failure' && '❌ Bump awakened-poe-trade submodule (contract tests fail)' || steps.contract.outputs.title }}
+          commit-message: "chore: bump ${{ matrix.vendor }} submodule"
+          branch: bump-${{ matrix.vendor }}
+          title: ${{ steps.test.outcome == 'failure' && format('❌ Bump {0} submodule (contract tests fail)', matrix.vendor) || steps.contract.outputs.title }}
           body: |
-            ${{ steps.test.outcome == 'failure' && format('❌ **`cargo test` failed**: upstream changed something `src/` relies on. See the Test step of {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) || 'Renderer build, `cargo build --release --locked` and `cargo test` (including the IPC type check against `ipc/types.ts`) passed in this workflow run.' }}
+            ${{ steps.test.outcome == 'failure' && format('❌ **`cargo test` failed**: upstream changed something `src/` relies on. See the Test step of {0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) || 'Renderer build, `cargo build --release --locked` and `cargo test` (including the IPC type check against both vendors'' `ipc/types.ts`) passed in this workflow run.' }}
 
             ${{ steps.contract.outputs.body }}

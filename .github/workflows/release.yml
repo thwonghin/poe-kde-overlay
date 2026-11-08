@@ -38,9 +38,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
-          key: npm-${{ hashFiles('vendor/awakened-poe-trade/renderer/package-lock.json') }}
+          key: npm-${{ hashFiles('vendor/*/renderer/package-lock.json') }}
 
-      - name: Build renderer
+      - name: Build renderers
         run: ./scripts/build-renderer.sh
 
       - name: Build backend
@@ -56,7 +56,8 @@ jobs:
           stage="apt-kwin-overlay-${GITHUB_REF_NAME}"
           mkdir -p "$stage/bin" "$stage/share/apt-kwin-overlay"
           cp target/release/apt-kwin-overlay "$stage/bin/"
-          cp -r vendor/awakened-poe-trade/renderer/dist "$stage/share/apt-kwin-overlay/dist"
+          cp -r vendor/awakened-poe-trade/renderer/dist "$stage/share/apt-kwin-overlay/poe1"
+          cp -r vendor/exiled-exchange-2/renderer/dist "$stage/share/apt-kwin-overlay/poe2"
           cp LICENSE README.md "$stage/"
           tar czf "$stage.tar.gz" "$stage"
           echo "archive=$stage.tar.gz" >> "$GITHUB_OUTPUT"
