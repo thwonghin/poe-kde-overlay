@@ -49,13 +49,6 @@ parse `logKeys` at all, and we'd have only modifier transitions to log (the
 EIS `KeyboardModifiers` feed `overlay_visibility.rs` uses), not real
 keydown/keyup events.
 
-## 5. No game-log-driven features (`GameLogWatcher.ts`)
-
-Whisper/trade/zone-change notifications from tailing `Client.txt`. Genuinely
-separate, sizeable feature — would need a file watcher on the log path
-(`cfg.clientLog` from config) and its own event stream into
-`MAIN->CLIENT::game-log`.
-
 ## 6. Not applicable / correctly out of scope, no action needed
 
 - **`AppUpdater.ts`** (real electron-updater auto-update flow) — we already
@@ -106,9 +99,7 @@ scratch later.
 ## Suggested order if picked back up
 
 1. §4 (`logKeys`) — low value with only modifier transitions to log.
-2. §5 (game log watcher) — biggest standalone feature, independent of
-   everything else; tackle whenever, in its own pass.
-3. §7 — proxy cookies and the single-instance lock have no confirmed
+2. §7 — proxy cookies and the single-instance lock have no confirmed
    symptom; pick up opportunistically.
 
 (§1, stash scroll-wheel navigation, is deliberately left off this list —
