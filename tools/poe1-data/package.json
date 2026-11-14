@@ -1,0 +1,8 @@
+{
+  "name": "poe1-data",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "pathofexile-dat": "16.0.1"
+  }
+}

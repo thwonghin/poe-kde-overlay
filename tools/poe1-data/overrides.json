@@ -1,0 +1,145 @@
+{
+  "add_frenzy_charge_on_critical_strike": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 1.0
+    }
+  },
+  "base_chance_to_freeze_% always_freeze": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      1,
+      2
+    ]
+  },
+  "bleed_on_hit_with_attacks_% global_bleed_on_hit cannot_cause_bleeding": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": -100.0,
+      "1": 100.0
+    }
+  },
+  "chance_to_gain_onslaught_on_kill_% onslaught_time_granted_on_kill_ms": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0,
+      1
+    ]
+  },
+  "chance_to_gain_unholy_might_on_block_% chance_to_gain_unholy_might_on_block_ms": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      3
+    ]
+  },
+  "charges_gained_+%": {
+    "why": "upstream uses another mod's wording",
+    "file": "heist_equipment_stat_descriptions"
+  },
+  "frozen_monsters_take_increased_damage": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 20.0
+    }
+  },
+  "local_charges_used_+% local_flask_consume_charges_used_+%_when_used": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0,
+      1
+    ]
+  },
+  "local_display_cast_level_1_summon_lesser_shrine_on_kill_%": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "2": 100.0
+    }
+  },
+  "local_extra_max_charges local_flask_consume_extra_max_charges_when_used": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0
+    ]
+  },
+  "local_flask_duration_+% local_flask_consume_flask_duration_+%_when_used": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0,
+      1
+    ]
+  },
+  "local_flask_effect_+% local_flask_consume_flask_effect_+%_when_used": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0,
+      1
+    ]
+  },
+  "local_flask_ignite_immunity_if_ignited_and_remove_burning": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 4.0
+    }
+  },
+  "local_physical_damage_+% local_weapon_no_physical_damage": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": -100.0
+    }
+  },
+  "local_unique_jewel_nearby_disconnected_passives_can_be_allocated unique_thread_of_hope_base_resist_all_elements_%": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0
+    ]
+  },
+  "map_blight_encounter_spawn_rate_+%": {
+    "why": "upstream uses another mod's wording",
+    "file": "stat_descriptions"
+  },
+  "map_monsters_additional_number_of_projecitles map_players_additional_number_of_projectiles": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0
+    ]
+  },
+  "map_players_spell_damage_%_suppressed": {
+    "why": "upstream's order follows no rule",
+    "order": [
+      1,
+      0
+    ]
+  },
+  "map_rogue_exiles_possessed_%_chance map_area_rogue_exiles_soul_eater_%_chance": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "3": 0.0
+    }
+  },
+  "shock_proliferation_radius_is_at_least_15": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 1.5
+    }
+  },
+  "spell_minimum_added_cold_damage_per_power_charge spell_maximum_added_cold_damage_per_power_charge": {
+    "why": "upstream's order follows no rule",
+    "order": [
+      0,
+      2,
+      1
+    ]
+  },
+  "unique_voltaxic_rift_shock_maximum_magnitude_override": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 40.0
+    }
+  },
+  "warcry_count_power_from_enemies warcry_gain_mp_from_allies warcry_gain_mp_from_corpses warcries_have_infinite_power": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      0
+    ]
+  }
+}
