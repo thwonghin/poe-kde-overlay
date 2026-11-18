@@ -51,6 +51,14 @@ mod tests {
     }
 
     #[test]
+    fn presence_stat_appends_the_condition() {
+        // implicit.stat_2960338345: "While a Pinnacle Atlas Boss is in your
+        // Presence, Attacks have #% chance to cause Bleeding".
+        let ids = ["bleed_on_hit_with_attacks_%", "global_bleed_on_hit", "cannot_cause_bleeding", "local_influence_mod_requires_celestial_boss_presence"];
+        assert_eq!(trade_stat_hash(&ids), 2960338345);
+    }
+
+    #[test]
     fn murmur2_every_tail_length() {
         // 0..=3 trailing bytes after the 4-byte blocks (seed 0).
         let cases: [(&[u8], u32); 6] = [

@@ -27,12 +27,17 @@ fn domain_file(domain: u32) -> Option<&'static str> {
         5 | 22 => "map_stat_descriptions", // AREA, HEIST_AREA
         7 => "sanctum_relic_stat_descriptions",
         23 => "heist_equipment_stat_descriptions", // HEIST_NPC
+        39 => "deepwater_stat_descriptions", // Deepwater charts (3.29 voyages)
+        41 => "stat_descriptions", // mercenary item mods
         34 => "tincture_stat_descriptions",
         37 => "atlas_relic_stat_descriptions", // IDOL (MapRelic mods): includes atlas, "in your Maps"
         _ => return None,
     })
 }
-const GEN_UNIQUE: u32 = 3;
+/// ModGenerationType (dat-schema enum) of mods read even with no spawn
+/// weight: PREFIX 1 and SUFFIX 2 (bench crafts, essence-only, unveiled,
+/// fossil mods), UNIQUE 3, BLIGHT_TOWER 19 (oil-anointed tower enchants).
+const GEN_WITHOUT_WEIGHT: &[u32] = &[1, 2, 3, 19];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -148,6 +153,26 @@ fn conversion(flag: &str) -> Option<f64> {
     DIVISORS.iter().find(|(p, _)| flag.starts_with(p)).map(|&(_, d)| d)
 }
 
+/// Whether the stat's value is shown with decimals (upstream's `dp`): one of
+/// its lines converts by a fraction the game shows with decimals. Not plain
+/// milliseconds/per-minute/metres conversions, nor the 2dp-if-required
+/// milliseconds one (3.29: 151 of 151).
+pub fn shows_decimals(lines: &[Variant]) -> bool {
+    const DP: &[&str] = &[
+        "divide_by_one_hundred",
+        "divide_by_one_hundred_2dp",
+        "divide_by_one_hundred_2dp_if_required",
+        "divide_by_one_thousand",
+        "divide_by_ten_1dp",
+        "divide_by_ten_1dp_if_required",
+        "per_minute_to_per_second_1dp",
+        "per_minute_to_per_second_2dp",
+        "per_minute_to_per_second_2dp_if_required",
+        "milliseconds_to_seconds_2dp",
+    ];
+    lines.iter().any(|v| v.flags.iter().any(|f| DP.contains(&f.name.as_str())))
+}
+
 /// The value a line without a `#` stands for ("Gain Onslaught on Kill" is a
 /// 100% chance, "Unlucky" is -1): the bound of the first stat it fixes to a
 /// non-zero range ("Projectiles Return to you" is `0 100|#` -> 100). With
@@ -236,6 +261,16 @@ pub fn block_matchers_indexed(variants: &[Variant], ov: Option<&Override>) -> Ve
     out
 }
 
+/// Stats with no description of their own that make every other stat of
+/// the mod conditional (Eldritch implicits). The client writes the line
+/// into this ClientStrings template ("While a Unique Enemy is in your
+/// Presence, {0}"), and the trade site counts it as a stat of its own: the
+/// hash of the block's ids followed by this one.
+const CONDITIONS: &[(&str, &str)] = &[
+    ("local_influence_mod_requires_unique_monster_presence", "InfluenceStatConditionPresenceUniqueMonster"),
+    ("local_influence_mod_requires_celestial_boss_presence", "InfluenceStatConditionPresenceCelestialBoss"),
+];
+
 /// A trade stat: every wording (block) the game has for it, one per mod
 /// domain that uses it, and the mods.
 #[derive(Default)]
@@ -243,6 +278,27 @@ pub struct Collected {
     pub blocks: Vec<usize>,
     /// (mod, block it was described with), in Mods table order.
     pub mods: Vec<(usize, usize)>,
+    /// (condition stat id, ClientStrings id of its template), see CONDITIONS.
+    pub condition: Option<(&'static str, &'static str)>,
+}
+
+impl Collected {
+    /// The stat ids the trade id hashes: the block's, then the condition's.
+    pub fn trade_ids(&self, desc: &Descriptions) -> Vec<String> {
+        let mut ids = desc.blocks[self.block()].ids.clone();
+        ids.extend(self.condition.map(|(id, _)| id.to_string()));
+        ids
+    }
+
+    /// Applies the condition's template (from `client_strings`) to matchers.
+    pub fn conditioned(&self, mut matchers: Vec<Matcher>, client_strings: &HashMap<String, String>) -> Vec<Matcher> {
+        if let Some(template) = self.condition.and_then(|(_, cs)| client_strings.get(cs)) {
+            for m in &mut matchers {
+                m.string = template.replace("{0}", &m.string);
+            }
+        }
+        matchers
+    }
 }
 
 impl Collected {
@@ -263,8 +319,9 @@ impl Collected {
 pub fn collect(mods: &[Mod], stats: &[Stat], desc: &Descriptions) -> BTreeMap<u32, Collected> {
     let mut by_hash: BTreeMap<u32, Collected> = BTreeMap::new();
     for (mod_idx, m) in mods.iter().enumerate() {
-        let spawns = m.spawn_weights.iter().any(|&w| w > 0) || m.generation_type == Some(GEN_UNIQUE);
+        let spawns = m.spawn_weights.iter().any(|&w| w > 0) || m.generation_type.is_some_and(|g| GEN_WITHOUT_WEIGHT.contains(&g));
         let Some(file) = m.domain.and_then(domain_file).filter(|_| spawns) else { continue };
+        let condition = m.stat_keys().find_map(|k| CONDITIONS.iter().copied().find(|(id, _)| *id == stats[k].id));
         let mut seen = Vec::new();
         for key in m.stat_keys() {
             let Some(block) = desc.lookup(file, &stats[key].id) else { continue };
@@ -272,7 +329,10 @@ pub fn collect(mods: &[Mod], stats: &[Stat], desc: &Descriptions) -> BTreeMap<u3
                 continue; // a mod's second stat of the same block
             }
             seen.push(block);
-            let entry = by_hash.entry(trade_stat_hash(&desc.blocks[block].ids)).or_default();
+            let mut ids = desc.blocks[block].ids.clone();
+            ids.extend(condition.map(|(id, _)| id.to_string()));
+            let entry = by_hash.entry(trade_stat_hash(&ids)).or_default();
+            entry.condition = condition;
             if !entry.blocks.contains(&block) {
                 entry.blocks.push(block);
             }
@@ -383,10 +443,27 @@ mod tests {
         let mut d = Descriptions { blocks: vec![], block_file: vec![], files: HashMap::new() };
         d.add("stat_descriptions", "description\n1 a\n1\n# \"#% Flask Charges gained\"").unwrap();
         d.add("heist_equipment_stat_descriptions", "description\n1 a\n1\n# \"Players have #% Flask Charges gained\"").unwrap();
-        let c = Collected { blocks: vec![1, 0], mods: vec![(0, 1), (1, 0)] };
+        let c = Collected { blocks: vec![1, 0], mods: vec![(0, 1), (1, 0)], condition: None };
         assert_eq!(c.chosen_block(&d, None), 0); // last mod's
         let ov = Override { file: Some("heist_equipment_stat_descriptions".into()), ..Default::default() };
         assert_eq!(c.chosen_block(&d, Some(&ov)), 1);
+    }
+
+    #[test]
+    fn presence_condition_wraps_lines() {
+        let c = Collected { blocks: vec![0], mods: vec![(0, 0)], condition: Some(CONDITIONS[0]) };
+        let cs: HashMap<String, String> = [("InfluenceStatConditionPresenceUniqueMonster".to_string(), "While a Unique Enemy is in your Presence, {0}".to_string())].into();
+        let got = c.conditioned(vec![Matcher { string: "#% chance to Freeze".into(), negate: false, value: None }], &cs);
+        assert_eq!(got[0].string, "While a Unique Enemy is in your Presence, #% chance to Freeze");
+    }
+
+    #[test]
+    fn decimals_by_conversion_flag() {
+        let b = |f: &str| parse(&format!("description\n1 a\n1\n# \"{{0}}\" {f} 1")).unwrap().remove(0);
+        assert!(shows_decimals(b("divide_by_one_hundred").lang("English").unwrap()));
+        assert!(shows_decimals(b("per_minute_to_per_second_2dp_if_required").lang("English").unwrap()));
+        assert!(!shows_decimals(b("milliseconds_to_seconds").lang("English").unwrap()));
+        assert!(!shows_decimals(b("milliseconds_to_seconds_2dp_if_required").lang("English").unwrap()));
     }
 
     #[test]
@@ -427,14 +504,15 @@ mod tests {
         d.add("atlas_stat_descriptions", "description\n1 a\n1\n# \"{0}% more in your Maps\"").unwrap();
         // Idols read atlas_relic, which includes atlas.
         d.add("atlas_relic_stat_descriptions", "include \"atlas_stat_descriptions.csd\"").unwrap();
-        let m = |domain, weight| Mod {
+        let mg = |domain, weight, generation| Mod {
             id: String::new(),
             domain: Some(domain),
-            generation_type: Some(1),
+            generation_type: Some(generation),
             spawn_weights: vec![weight],
             stats_key1: Some(0),
             stats_key2: None, stats_key3: None, stats_key4: None, stats_key5: None, stats_key6: None,
         };
+        let m = |domain, weight| mg(domain, weight, 1);
         let stats = [Stat { id: "a".into() }];
         let text = |mods: &[Mod]| {
             let c = collect(mods, &stats, &d);
@@ -444,9 +522,11 @@ mod tests {
         // AREA (map -> stat_descriptions) then IDOL (atlas): atlas wording.
         assert_eq!(text(&[m(5, 100), m(37, 100)]), "{0}% more in your Maps");
         assert_eq!(text(&[m(37, 100), m(5, 100)]), "{0}% more in Area");
-        // A mod that can't spawn (and isn't unique) is not read, nor is a
+        // A mod without spawn weight is read only if a prefix/suffix/unique/
+        // blight tower mod (here CORRUPTED 5 isn't, PREFIX 1 is), nor is a
         // domain upstream leaves out (ATLAS passives, 11).
-        assert_eq!(text(&[m(5, 100), m(37, 0)]), "{0}% more in Area");
+        assert_eq!(text(&[m(5, 100), mg(37, 0, 5)]), "{0}% more in Area");
+        assert_eq!(text(&[m(5, 100), mg(37, 0, 1)]), "{0}% more in your Maps");
         assert_eq!(text(&[m(5, 100), m(11, 100)]), "{0}% more in Area");
     }
 }

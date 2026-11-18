@@ -1,4 +1,8 @@
 {
+  "-%_of_your_damage_cannot_be_reflected": {
+    "why": "which way is better is semantic",
+    "better": 1
+  },
   "add_frenzy_charge_on_critical_strike": {
     "why": "upstream sets the value by hand",
     "value": {
@@ -11,6 +15,10 @@
       1,
       2
     ]
+  },
+  "base_frozen_effect_on_self_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
   },
   "bleed_on_hit_with_attacks_% global_bleed_on_hit cannot_cause_bleeding": {
     "why": "upstream sets the value by hand",
@@ -36,23 +44,164 @@
     "why": "upstream uses another mod's wording",
     "file": "heist_equipment_stat_descriptions"
   },
+  "cold_exposure_on_hit_magnitude": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "cold_exposure_you_inflict_applies_extra_cold_resistance_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "curse_effect_on_self_+%_while_on_consecrated_ground": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "elemental_damage_resistance_+%": {
+    "why": "which way is better is semantic",
+    "better": 1
+  },
+  "elemental_damage_taken_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "exposure_you_inflict_applies_extra_%_to_affected_resistance": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "fire_exposure_on_hit_magnitude": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
   "frozen_monsters_take_increased_damage": {
     "why": "upstream sets the value by hand",
     "value": {
       "0": 20.0
     }
   },
+  "heist_contract_alert_level_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_alert_level_from_chests_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_agility_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_brute_force_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_counter_thaumaturgy_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_deception_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_demolition_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_engineering_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_lockpicking_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_perception_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_npc_trap_disarmament_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "heist_contract_travel_cost_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "life_degeneration_per_10_seconds_not_in_grace": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "life_degeneration_per_minute_not_in_grace": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "life_loss_%_per_minute_if_have_been_hit_recently": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "lightning_exposure_on_hit_magnitude": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "link_skills_grant_minions_damage_taken_+%_final_from_hallowed_monarch": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_attribute_requirements_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
   "local_charges_used_+% local_flask_consume_charges_used_+%_when_used": {
-    "why": "upstream drops lines no rule explains",
+    "why": "upstream drops lines no rule explains; which way is better is semantic",
     "keep": [
       0,
       1
-    ]
+    ],
+    "better": -1
   },
   "local_display_cast_level_1_summon_lesser_shrine_on_kill_%": {
     "why": "upstream sets the value by hand",
     "value": {
       "2": 100.0
+    }
+  },
+  "local_display_fire_burst_on_hit_%": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 20.0
+    }
+  },
+  "local_display_nearby_enemies_all_resistances_%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_display_nearby_enemy_chaos_damage_resistance_%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_display_nearby_enemy_cold_damage_resistance_%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_display_nearby_enemy_fire_damage_resistance_%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_display_nearby_enemy_lightning_damage_resistance_%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_display_socketed_attacks_mana_cost_+": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_display_socketed_gems_additional_critical_strike_chance_%": {
+    "why": "upstream sets the value by hand",
+    "value": {
+      "0": 3.5
     }
   },
   "local_extra_max_charges local_flask_consume_extra_max_charges_when_used": {
@@ -81,11 +230,31 @@
       "0": 4.0
     }
   },
+  "local_flask_skill_mana_cost_+%_during_flask_effect": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_jewel_expansion_passive_node_count": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
   "local_physical_damage_+% local_weapon_no_physical_damage": {
     "why": "upstream sets the value by hand",
     "value": {
       "0": -100.0
     }
+  },
+  "local_self_freeze_duration_+%_during_flask_effect": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_self_shock_effect_+%_during_flask_effect": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "local_unique_jewel_grants_x_empty_passives": {
+    "why": "which way is better is semantic",
+    "better": -1
   },
   "local_unique_jewel_nearby_disconnected_passives_can_be_allocated unique_thread_of_hope_base_resist_all_elements_%": {
     "why": "upstream drops lines no rule explains",
@@ -93,15 +262,59 @@
       0
     ]
   },
+  "lose_%_of_es_on_crit": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "lose_%_of_life_on_crit": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "lose_%_of_mana_when_you_use_an_attack_skill": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "lose_x_mana_when_you_use_skill": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "mana_degeneration_per_minute": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "mana_degeneration_per_minute_%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "mana_degeneration_per_minute_not_in_grace": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
   "map_blight_encounter_spawn_rate_+%": {
     "why": "upstream uses another mod's wording",
     "file": "stat_descriptions"
+  },
+  "map_item_drop_quantity_+% chart_quantity_voyage_display_stat": {
+    "why": "upstream uses another mod's wording",
+    "file": "atlas_stat_descriptions"
+  },
+  "map_item_drop_rarity_+% chart_rarity_voyage_display_stat": {
+    "why": "upstream uses another mod's wording",
+    "file": "atlas_stat_descriptions"
   },
   "map_monsters_additional_number_of_projecitles map_players_additional_number_of_projectiles": {
     "why": "upstream drops lines no rule explains",
     "keep": [
       0
     ]
+  },
+  "map_num_extra_harbingers": {
+    "why": "upstream uses another mod's wording",
+    "file": "stat_descriptions"
+  },
+  "map_pack_size_+% chart_pack_size_voyage_display_stat": {
+    "why": "upstream uses another mod's wording",
+    "file": "atlas_stat_descriptions"
   },
   "map_players_spell_damage_%_suppressed": {
     "why": "upstream's order follows no rule",
@@ -116,11 +329,27 @@
       "3": 0.0
     }
   },
+  "physical_and_chaos_damage_taken_+%_final_while_not_unhinged": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "physical_damage_taken_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
+  "self_poison_duration_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
+  },
   "shock_proliferation_radius_is_at_least_15": {
     "why": "upstream sets the value by hand",
     "value": {
       "0": 1.5
     }
+  },
+  "shocked_chilled_effect_on_self_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
   },
   "spell_minimum_added_cold_damage_per_power_charge spell_maximum_added_cold_damage_per_power_charge": {
     "why": "upstream's order follows no rule",
@@ -130,11 +359,25 @@
       1
     ]
   },
+  "trigger_socketed_spell_on_skill_use_%": {
+    "why": "upstream drops lines no rule explains",
+    "keep": [
+      1
+    ]
+  },
+  "unique_ryuslathas_clutches_minimum_physical_attack_damage_+%_final": {
+    "why": "which way is better is semantic",
+    "better": 1
+  },
   "unique_voltaxic_rift_shock_maximum_magnitude_override": {
     "why": "upstream sets the value by hand",
     "value": {
       "0": 40.0
     }
+  },
+  "vaal_skill_soul_gain_preventation_duration_+%": {
+    "why": "which way is better is semantic",
+    "better": -1
   },
   "warcry_count_power_from_enemies warcry_gain_mp_from_allies warcry_gain_mp_from_corpses warcries_have_infinite_power": {
     "why": "upstream drops lines no rule explains",

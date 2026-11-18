@@ -62,7 +62,36 @@ for (const file of descFiles) {
 console.log(`exported ${descFiles.length - missing.length}/${descFiles.length} stat description files`)
 if (missing.length) console.warn(`MISSING on CDN:\n  ${missing.join('\n  ')}`)
 
-// exportTables writes to <cwd>/tables regardless of its outDir argument.
+// One table of one language at a time, so a bundle the CDN dropped (3.29.3.6
+// lost Korean ClientStrings) costs only that table. exportTables writes to
+// <cwd>/tables regardless of its outDir argument and clears the language's
+// folder first, hence the scratch cwd.
+const tablesDir = path.join(dir, 'tables')
+const scratch = path.join(dir, '.export')
+await fs.rm(tablesDir, { recursive: true, force: true })
+const missingTables = []
+for (const { game } of LANGUAGES) {
+  await fs.mkdir(path.join(tablesDir, game), { recursive: true })
+  for (const table of TABLES) {
+    await fs.rm(scratch, { recursive: true, force: true })
+    await fs.mkdir(scratch)
+    process.chdir(scratch)
+    try {
+      await exportTables({ patch, translations: [game], tables: [table] }, path.join(scratch, 'tables'), loader)
+      await fs.rename(path.join(scratch, 'tables', game, `${table.name}.json`), path.join(tablesDir, game, `${table.name}.json`))
+    } catch (e) {
+      missingTables.push(`${game}/${table.name} (${e.message})`)
+    }
+  }
+}
 process.chdir(dir)
-await exportTables({ patch, translations: LANGUAGES.map(l => l.game), tables: TABLES }, path.join(dir, 'tables'), loader)
+await fs.rm(scratch, { recursive: true, force: true })
+if (missingTables.length) console.warn(`MISSING tables:\n  ${missingTables.join('\n  ')}`)
+
+// The trade site's stat list: which stats it searches, and as what types.
+// Live, so only meaningful for the current league's patch.
+const res = await fetch('https://www.pathofexile.com/api/trade/data/stats', { headers: { 'User-Agent': 'poe-kde-overlay data generator' } })
+if (!res.ok) throw new Error(`trade stats: HTTP ${res.status}`)
+await fs.mkdir(path.join(dir, 'trade'), { recursive: true })
+await fs.writeFile(path.join(dir, 'trade', 'stats.json'), await res.text())
 console.log(`exported to ${dir}`)

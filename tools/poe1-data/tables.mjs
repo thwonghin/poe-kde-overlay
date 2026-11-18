@@ -18,5 +18,7 @@ export const TABLES = [
       'Stat4Min', 'Stat4Max', 'Stat5Min', 'Stat5Max', 'Stat6Min', 'Stat6Max']
   },
   { name: 'Stats', columns: ['Id', 'IsLocal', 'IsWeaponLocal'] },
-  { name: 'ModFamily', columns: ['Id'] }
+  { name: 'ModFamily', columns: ['Id'] },
+  // UI text the client adds to stat lines (Eldritch "presence" prefixes).
+  { name: 'ClientStrings', columns: ['Id', 'Text'] }
 ]

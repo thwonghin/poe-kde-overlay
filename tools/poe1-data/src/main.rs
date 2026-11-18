@@ -11,6 +11,7 @@ mod descriptions;
 mod murmur;
 mod overrides;
 mod stats;
+mod trade;
 
 use serde_json::Value;
 
@@ -48,6 +49,15 @@ struct Oracle {
     collected: std::collections::BTreeMap<u32, stats::Collected>,
     /// Upstream's stats by trade stat hash.
     upstream: HashMap<u32, Value>,
+    /// The language's ClientStrings, by id, and English ones.
+    client_strings: HashMap<String, String>,
+    en_client_strings: HashMap<String, String>,
+    trade: trade::Trade,
+}
+
+fn load_client_strings(cache: &Path, lang: &str) -> Result<HashMap<String, String>, String> {
+    let rows: Vec<Value> = read_json(&cache.join("tables").join(lang).join("ClientStrings.json"))?;
+    Ok(rows.iter().filter_map(|r| Some((r["Id"].as_str()?.to_string(), r["Text"].as_str()?.to_string()))).collect())
 }
 
 impl Oracle {
@@ -56,7 +66,12 @@ impl Oracle {
         let mods: Vec<stats::Mod> = read_json(&cache.join("tables/English/Mods.json"))?;
         let game_stats: Vec<stats::Stat> = read_json(&cache.join("tables/English/Stats.json"))?;
         let desc = stats::Descriptions::load(&cache.join("files"))?;
-        let collected = stats::collect(&mods, &game_stats, &desc);
+        let trade = trade::Trade::load(&cache.join("trade/stats.json"))?;
+        // Only what the trade site searches.
+        let mut collected = stats::collect(&mods, &game_stats, &desc);
+        collected.retain(|h, _| trade.has(*h));
+        let client_strings = load_client_strings(cache, lang)?;
+        let en_client_strings = load_client_strings(cache, "English")?;
 
         let path = upstream_dir().join(code).join("stats.ndjson");
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -71,30 +86,91 @@ impl Oracle {
                 }
             }
         }
-        Ok(Oracle { lang, mods, desc, collected, upstream })
+        Ok(Oracle { lang, mods, desc, collected, upstream, client_strings, en_client_strings, trade })
     }
 
     /// Our matchers for a collected stat, as JSON.
     fn matchers(&self, c: &stats::Collected, ov: Option<&overrides::Override>) -> Value {
         let block = &self.desc.blocks[c.chosen_block(&self.desc, ov)];
-        serde_json::to_value(stats::block_matchers(block.lang(self.lang).unwrap_or_default(), ov)).unwrap()
+        serde_json::to_value(c.conditioned(stats::block_matchers(block.lang(self.lang).unwrap_or_default(), ov), &self.client_strings)).unwrap()
+    }
+
+    /// A stats.ndjson entry (the fields generated so far) named `ref_`.
+    fn stat(&self, hash: u32, c: &stats::Collected, ov: Option<&overrides::Override>, ref_: &str) -> Value {
+        let block = &self.desc.blocks[c.chosen_block(&self.desc, ov)];
+        let english = block.lang("English").unwrap_or_default();
+        // The site counts the stat in its ref's direction: a ref that is a
+        // negated line ("Golems have #% less Life") means inverted values.
+        let en = c.conditioned(stats::block_matchers(english, ov), &self.en_client_strings);
+        let wording = ref_.replace("+#", "#").replace("-#", "#");
+        let inverted = en.iter().any(|m| m.negate && m.string == wording);
+        let better = ov.and_then(|o| o.better).unwrap_or(if inverted { -1 } else { 1 });
+        let mut trade = serde_json::json!({ "ids": self.trade.ids(hash, ref_).unwrap() });
+        if inverted {
+            trade["inverted"] = true.into();
+        }
+        let mut stat = serde_json::json!({ "ref": ref_, "better": better, "matchers": self.matchers(c, ov), "trade": trade });
+        if stats::shows_decimals(english) {
+            stat["dp"] = true.into();
+        }
+        stat
     }
 }
 
-/// Returns (covered, exact).
-fn compare(cache: &Path, code: &str) -> Result<(usize, usize), String> {
+/// The fields of an upstream stat the generator makes so far.
+fn generated_fields(s: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for k in ["ref", "dp", "better", "matchers"] {
+        if let Some(v) = s.get(k) {
+            out.insert(k.into(), v.clone());
+        }
+    }
+    let mut trade = serde_json::Map::new();
+    for k in ["ids", "inverted"] {
+        if let Some(v) = s["trade"].get(k) {
+            trade.insert(k.into(), v.clone());
+        }
+    }
+    out.insert("trade".into(), Value::Object(trade));
+    Value::Object(out)
+}
+
+/// Stats the oracle can't reproduce for a reason outside the generator.
+const ORACLE_NOISE: &[(&str, &str)] = &[(
+    "#% chance to gain a Brine Charge instead of an Endurance Charge",
+    "unknown to RePoE's 3.29.3.3 export, so its trade types come from the 3.30 site, which added implicit",
+)];
+
+/// Returns the refs of covered stats that differ from upstream.
+fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
     let o = Oracle::load(cache, code)?;
     let ovs = overrides::load(&overrides_path())?;
-    let (mut covered, mut exact) = (0, 0);
-    let (mut miss, mut diff) = (Vec::new(), Vec::new());
+    let (mut covered, mut exact, mut stat_exact, mut ref_rule) = (0, 0, 0, 0);
+    let (mut miss, mut diff, mut stat_diff, mut differ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (h, s) in &o.upstream {
         let Some(c) = o.collected.get(h) else {
             miss.push(s["ref"].clone());
             continue;
         };
         covered += 1;
-        let ids = &o.desc.blocks[c.block()].ids;
-        let ours = o.matchers(c, ovs.get(&overrides::key(ids)));
+        // Refs stay as previously named (renderer code and saved filters
+        // look them up); a new stat's is the site's text.
+        let rule_ref = o.trade.ref_text(*h).unwrap();
+        if rule_ref == s["ref"] {
+            ref_rule += 1;
+        }
+        let ids = c.trade_ids(&o.desc);
+        // Keyed by block: upstream's hand edits also apply to its presence twins.
+        let ov = ovs.get(&overrides::key(&o.desc.blocks[c.block()].ids));
+        let stat = o.stat(*h, c, ov, s["ref"].as_str().unwrap());
+        let theirs = generated_fields(s);
+        if stat == theirs {
+            stat_exact += 1;
+        } else {
+            differ.push(s["ref"].as_str().unwrap().to_string());
+            stat_diff.push(serde_json::json!({ "theirs": theirs, "ours": stat }));
+        }
+        let ours = o.matchers(c, ov);
         if ours == s["matchers"] {
             exact += 1;
         } else {
@@ -110,11 +186,19 @@ fn compare(cache: &Path, code: &str) -> Result<(usize, usize), String> {
         }
     }
     let up_hashes: HashSet<&u32> = o.upstream.keys().collect();
-    let extra: Vec<String> = o.collected.iter().filter(|(h, _)| !up_hashes.contains(h)).map(|(_, c)| o.desc.blocks[c.blocks[0]].ids.join(" ")).collect();
+    let extra: Vec<Value> = o
+        .collected
+        .iter()
+        .filter(|(h, _)| !up_hashes.contains(h))
+        .map(|(h, c)| {
+            let mods: Vec<String> = c.mods.iter().map(|&(m, _)| format!("d{} g{}", o.mods[m].domain.unwrap_or(0), o.mods[m].generation_type.unwrap_or(0))).collect();
+            serde_json::json!({ "ids": o.desc.blocks[c.blocks[0]].ids, "text": o.trade.ref_text(*h), "mods": mods, "first_mod": o.mods[c.mods[0].0].id })
+        })
+        .collect();
     let keys: HashSet<String> = o.collected.values().map(|c| overrides::key(&o.desc.blocks[c.block()].ids)).collect();
     let stale: Vec<&String> = ovs.keys().filter(|k| !keys.contains(*k)).collect();
     println!(
-        "upstream hash stats {}, generated {}, covered {covered}, exact {exact} ({:.1}%), extra {}, overrides {} ({} stale)",
+        "upstream hash stats {}, generated {}, covered {covered}, matchers exact {exact} ({:.1}%), stats exact {stat_exact}, ref = site text {ref_rule}, extra {}, overrides {} ({} stale)",
         o.upstream.len(),
         o.collected.len(),
         100.0 * exact as f64 / covered.max(1) as f64,
@@ -123,10 +207,11 @@ fn compare(cache: &Path, code: &str) -> Result<(usize, usize), String> {
         stale.len()
     );
     let out = cache.join(format!("compare-{code}.json"));
-    let report = serde_json::json!({ "miss": miss, "diff": diff, "extra": extra, "stale_overrides": stale });
+    let report = serde_json::json!({ "miss": miss, "diff": diff, "stat_diff": stat_diff, "extra": extra, "stale_overrides": stale });
     std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).map_err(|e| e.to_string())?;
-    println!("details: {}", out.display());
-    Ok((covered, exact))
+    let noise = differ.iter().filter(|r| ORACLE_NOISE.iter().any(|(n, _)| n == *r)).count();
+    println!("{} differ, {noise} of them known oracle noise (ORACLE_NOISE); details: {}", differ.len(), out.display());
+    Ok(differ)
 }
 
 /// The override that makes our matchers for `c` equal upstream's `theirs`,
@@ -138,7 +223,8 @@ fn derive(o: &Oracle, c: &stats::Collected, theirs: &Value) -> Option<overrides:
     for b in blocks {
         let lines = o.desc.blocks[b].lang(o.lang)?;
         // Upstream's matchers as line indexes (first line with that text).
-        let Some(idx) = wanted.iter().map(|(s, _)| lines.iter().position(|v| stats::line_string(v) == *s)).collect::<Option<Vec<usize>>>() else { continue };
+        let wrap = |t: String| c.conditioned(vec![stats::Matcher { string: t, negate: false, value: None }], &o.client_strings).remove(0).string;
+        let Some(idx) = wanted.iter().map(|(s, _)| lines.iter().position(|v| wrap(stats::line_string(v)) == *s)).collect::<Option<Vec<usize>>>() else { continue };
         let mut ov = overrides::Override { file: (b != default).then(|| o.desc.block_file[b].clone()), ..Default::default() };
         let all = stats::block_matchers_indexed(lines, None);
         if all.len() != idx.len() || !all.iter().all(|(i, _)| idx.contains(i)) {
@@ -151,7 +237,7 @@ fn derive(o: &Oracle, c: &stats::Collected, theirs: &Value) -> Option<overrides:
         let ours = stats::block_matchers_indexed(lines, Some(&ov));
         for ((s, value), &i) in wanted.iter().zip(&idx) {
             if let Some((_, m)) = ours.iter().find(|(j, _)| *j == i) {
-                if m.string == *s && m.value != *value {
+                if wrap(m.string.clone()) == *s && m.value != *value {
                     ov.value.insert(i, *value);
                 }
             }
@@ -166,7 +252,7 @@ fn derive(o: &Oracle, c: &stats::Collected, theirs: &Value) -> Option<overrides:
         if !ov.value.is_empty() { why.push("upstream sets the value by hand") }
         if ov.order.is_some() { why.push("upstream's order follows no rule") }
         ov.why = why.join("; ");
-        let got = serde_json::to_value(stats::block_matchers(lines, Some(&ov))).unwrap();
+        let got = serde_json::to_value(c.conditioned(stats::block_matchers(lines, Some(&ov)), &o.client_strings)).unwrap();
         if got == *theirs {
             return Some(ov);
         }
@@ -183,15 +269,27 @@ fn derive_overrides(cache: &Path) -> Result<(), String> {
     for (h, s) in &o.upstream {
         let Some(c) = o.collected.get(h) else { continue };
         let key = overrides::key(&o.desc.blocks[c.block()].ids);
-        if o.matchers(c, ovs.get(&key)) == s["matchers"] {
-            continue;
-        }
-        match derive(&o, c, &s["matchers"]) {
-            Some(ov) => {
-                ovs.insert(key, ov);
-                added += 1;
+        let ref_ = s["ref"].as_str().unwrap();
+        if o.matchers(c, ovs.get(&key)) != s["matchers"] {
+            match derive(&o, c, &s["matchers"]) {
+                Some(ov) => {
+                    ovs.insert(key.clone(), ov);
+                    added += 1;
+                }
+                None => {
+                    inexpressible.push(format!("{key}: {}", s["ref"]));
+                    continue;
+                }
             }
-            None => inexpressible.push(format!("{key}: {}", s["ref"])),
+        }
+        let better = s["better"].as_i64().unwrap() as i8;
+        if o.stat(*h, c, ovs.get(&key), ref_)["better"] != better {
+            let ov = ovs.entry(key).or_default();
+            ov.better = Some(better);
+            if !ov.why.contains("better") {
+                ov.why = [ov.why.as_str(), "which way is better is semantic"].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("; ");
+            }
+            added += 1;
         }
     }
     overrides::save(&path, &ovs)?;
@@ -235,7 +333,9 @@ mod tests {
             eprintln!("skipped: no {} (see oracle.mjs)", cache.display());
             return;
         }
-        let (covered, exact) = compare(&cache, "en").unwrap();
-        assert_eq!(exact, covered, "see cache/oracle/compare-en.json");
+        let differ = compare(&cache, "en").unwrap();
+        let unexplained: Vec<&String> = differ.iter().filter(|r| !ORACLE_NOISE.iter().any(|(n, _)| n == r)).collect();
+        assert!(unexplained.is_empty(), "differ from upstream (see cache/oracle/compare-en.json): {unexplained:?}");
     }
 }
+

@@ -9,7 +9,10 @@
 // upstream used (repoe-fork/repoe-fork.github.io commit "Export <patch>",
 // stat translations converted back to the game's text), and only then from
 // <current patch>. Both patches must be exported first (export.mjs).
-// Output: cache/oracle/{files,tables} for `poe1-data compare cache/oracle`.
+// The trade site's list is live (current league), so the oracle's is
+// RePoE's `trade_stats` at upstream's patch, plus <current patch>'s list for
+// what RePoE can't know (Eldritch presence stats).
+// Output: cache/oracle/{files,tables,trade} for `poe1-data compare cache/oracle`.
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -73,3 +76,23 @@ for (const file of await fs.readdir(path.join(cache, curPatch, 'files'))) {
   from.repoe++
 }
 console.log('stat description files from:', from)
+
+// Trade list: RePoE's trade_stats of every stat translation file, as the
+// trade API's shape, then the current list's entries RePoE lacks.
+const repoeFiles = ['stat_translations.json', ...(await (await fetch(`https://api.github.com/repos/repoe-fork/repoe-fork.github.io/contents/data/stat_translations?ref=${repoe}`)).json()).map(f => `stat_translations/${f.name}`)]
+const entries = new Map()
+for (const f of repoeFiles) {
+  const res = await fetch(`https://raw.githubusercontent.com/repoe-fork/repoe-fork.github.io/${repoe}/data/${f}`)
+  if (!res.ok) throw new Error(`${f}: HTTP ${res.status}`)
+  for (const e of await res.json()) for (const t of e.trade_stats ?? []) entries.set(t.id, { id: t.id, text: t.text, type: t.type })
+}
+const fromRepoe = entries.size
+// Only stats RePoE doesn't know at all: one it knows keeps its 3.29 types.
+const hashOf = id => /\.stat_(\d+)$/.exec(id)?.[1]
+const known = new Set([...entries.keys()].map(hashOf).filter(Boolean))
+const current = JSON.parse(await fs.readFile(path.join(cache, curPatch, 'trade', 'stats.json'), 'utf8'))
+for (const g of current.result) for (const e of g.entries) if (!entries.has(e.id) && !known.has(hashOf(e.id))) entries.set(e.id, e)
+const groups = current.result.map(g => ({ id: g.id, label: g.label, entries: [...entries.values()].filter(e => e.type === g.id) }))
+await fs.mkdir(path.join(out, 'trade'))
+await fs.writeFile(path.join(out, 'trade', 'stats.json'), JSON.stringify({ result: groups }))
+console.log(`trade stats: ${fromRepoe} from RePoE, ${entries.size - fromRepoe} from ${curPatch}`)

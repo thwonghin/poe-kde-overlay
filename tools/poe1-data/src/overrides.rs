@@ -3,7 +3,8 @@
 //! value it sets by hand, an order or a wording no rule explains.
 //!
 //! Keyed by the description block's stat ids (space-separated), so an entry
-//! survives a league and applies to every language: the translations of a
+//! survives a league, also applies to the block's Eldritch presence twins
+//! (upstream edits those alike), and applies to every language: the translations of a
 //! block have the same lines, with the same conditions, in the same order.
 //! Lines are named by their index in the block (file order, from 0).
 //!
@@ -31,6 +32,10 @@ pub struct Override {
     /// Matchers in this order of lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<usize>>,
+    /// Whether a higher (1) or lower (-1) value is better, where it isn't
+    /// what the trade site's wording implies ("#% increased Damage taken").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub better: Option<i8>,
 }
 
 pub type Overrides = BTreeMap<String, Override>;
