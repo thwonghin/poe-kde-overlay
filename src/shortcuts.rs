@@ -488,6 +488,10 @@ async fn price_check(
     // focusOverlay matches the real app's hotkey semantics
     // (PriceCheckWindow.vue): plain Ctrl+D auto-closes on mouse-move-away
     // (spawn_auto_close), Ctrl+Alt+D ("hotkeyLocked") opens interactive.
+    let clipboard = match game {
+        crate::game::Game::Poe1 => poe1_viscera_text(clipboard),
+        crate::game::Game::Poe2 => clipboard,
+    };
     overlay.events().clear_track_area();
     overlay.events().send_last_active(&MainEvent::ItemText {
         target: target.to_string(),
@@ -657,9 +661,72 @@ fn spawn_auto_close(overlay: Rc<Overlay>, from_x: f64, from_y: f64) {
     });
 }
 
+/// poe1 3.30 Viscera text, in each language the poe1 renderer reads, as
+/// (Item Class line, Rarity line to add, name tier prefixes). Upstream's
+/// parser reads modifiers only of an item with a rarity (Parser.ts
+/// parseModifiers), and a Viscera's text has no Rarity line, so its implicit
+/// was dropped; as a Normal item it's read and searched like one. Its name
+/// may carry a tier (ClientStrings LesserViscera/GreaterViscera, "Lesser
+/// {0}"), which the trade site and the renderer's base types don't have, so
+/// it's dropped. Class names: the game's ItemClasses.Name (tools/poe1-data
+/// export).
+///
+/// ponytail: Viscera only, hardcoded; drop once upstream parses them.
+const POE1_VISCERA: &[(&str, &str, [&str; 2])] = &[
+    ("Item Class: Viscera", "Rarity: Normal", ["Lesser ", "Greater "]),
+    ("Класс предмета: Части тел", "Редкость: Обычный", ["Мелкая часть тела: ", "Крупная часть тела: "]),
+    ("物品種類: 臟器", "稀有度: 普通", ["低階 ", "高階 "]),
+    ("아이템 종류: 살덩이", "아이템 희귀도: 일반", ["하위 ", "상위 "]),
+];
+
+/// A poe1 Viscera's `text` as upstream's parser reads it (POE1_VISCERA);
+/// other text unchanged.
+fn poe1_viscera_text(text: String) -> String {
+    let Some((first, rest)) = text.split_once('\n') else { return text };
+    let eol = if first.ends_with('\r') { "\r\n" } else { "\n" };
+    let class = first.trim_end_matches('\r');
+    let Some((_, rarity, tiers)) = POE1_VISCERA.iter().find(|(c, ..)| *c == class) else { return text };
+    // Already has one (a later patch): leave it.
+    if rest.starts_with(rarity.split_once(": ").map_or(*rarity, |(r, _)| r)) {
+        return text;
+    }
+    let base = |name: &'_ str| tiers.iter().find_map(|t| name.strip_prefix(t)).unwrap_or(name).to_string();
+    let rest = match rest.split_once('\n') {
+        Some((name, after)) => format!("{}\n{after}", base(name)),
+        None => base(rest),
+    };
+    format!("{class}{eol}{rarity}{eol}{rest}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poe1_viscera_get_a_rarity_and_lose_the_tier() {
+        let viscera = "物品種類: 臟器\r\n高階 學者之臂\r\n--------\r\n上肢";
+        assert_eq!(poe1_viscera_text(viscera.into()), "物品種類: 臟器\r\n稀有度: 普通\r\n學者之臂\r\n--------\r\n上肢");
+        let en = "Item Class: Viscera\nSpectral Hood";
+        assert_eq!(poe1_viscera_text(en.into()), "Item Class: Viscera\nRarity: Normal\nSpectral Hood");
+        let ru = "Класс предмета: Части тел\nМелкая часть тела: X\n--------";
+        assert_eq!(poe1_viscera_text(ru.into()), "Класс предмета: Части тел\nРедкость: Обычный\nX\n--------");
+        // Other classes, and a Viscera that has a rarity, are untouched.
+        for text in ["Item Class: Rings\nRarity: Rare\nX", "Item Class: Viscera\nRarity: Magic\nGreater X", "Item Class: Viscera"] {
+            assert_eq!(poe1_viscera_text(text.into()), text);
+        }
+    }
+
+    /// The lines are built from the poe1 renderer's own client strings.
+    #[test]
+    fn poe1_rarity_lines_match_the_renderer() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/awakened-poe-trade/renderer/public/data");
+        for (lang, (class, rarity, _)) in ["en", "ru", "cmn-Hant", "ko"].iter().zip(POE1_VISCERA) {
+            let source = std::fs::read_to_string(root.join(lang).join("client_strings.js")).unwrap();
+            let value = |key: &str| crate::game::ts_string_values(&source, &format!("\n  {key}")).remove(0);
+            assert!(class.starts_with(&value("ITEM_CLASS")), "{lang}: {class}");
+            assert_eq!(*rarity, value("RARITY") + &value("RARITY_NORMAL"), "{lang}");
+        }
+    }
 
     #[test]
     fn builtin_actions_stay_dispatchable_and_the_renderer_wins() {
