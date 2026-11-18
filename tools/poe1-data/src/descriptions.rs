@@ -203,8 +203,12 @@ pub fn matcher_text(text: &str) -> String {
                 rest = &rest[end + 1..];
                 continue;
             }
-            let index = inner.split_once(':').map_or(inner, |(i, _)| i);
+            let (index, format) = inner.split_once(':').unwrap_or((inner, ""));
             if c == '{' && index.bytes().all(|b| b.is_ascii_digit()) {
+                // "{0:+d}" shows its sign: "+#".
+                if format.starts_with('+') {
+                    out.push('+');
+                }
                 out.push('#');
                 rest = &rest[end + 1..];
                 continue;
@@ -292,7 +296,7 @@ description
 
     #[test]
     fn matcher_text_strips_markup_and_values() {
-        assert_eq!(matcher_text("{0:+d}% to [Blind] Enemies"), "#% to Blind Enemies");
+        assert_eq!(matcher_text("{0:+d}% to [Blind] Enemies"), "+#% to Blind Enemies");
         assert_eq!(matcher_text("Triggers Level {0} [PhysicalAegis::#|Physical Aegis]"), "Triggers Level # Physical Aegis");
         assert_eq!(matcher_text("Duration {} seconds\\nsecond line"), "Duration # seconds\nsecond line");
         // Not markup or a placeholder: left alone.

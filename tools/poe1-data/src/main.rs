@@ -6,8 +6,11 @@
 //!   cargo run --release -- derive-overrides <cache/patch dir>
 //!       add overrides.json entries for stats no rule reproduces, each
 //!       checked to reproduce upstream; lists what can't be expressed
+//!   cargo run --release -- extra-items <cache/patch dir>
+//!       write extra/<lang>/items.ndjson: base types upstream lacks (items)
 
 mod descriptions;
+mod items;
 mod murmur;
 mod overrides;
 mod stats;
@@ -95,7 +98,18 @@ impl Oracle {
     /// Our matchers for a collected stat, as JSON.
     fn matchers(&self, c: &stats::Collected, ov: Option<&overrides::Override>) -> Value {
         let block = &self.desc.blocks[c.chosen_block(&self.desc, ov)];
-        serde_json::to_value(c.conditioned(stats::block_matchers(block.lang(self.lang).unwrap_or_default(), ov), &self.client_strings)).unwrap()
+        let lines = block.lang(self.lang).unwrap_or_default();
+        let mut matchers = stats::block_matchers_indexed(lines, ov);
+        // Untranslated, or mistranslated ("恢復{1}生命" for Mana): the English
+        // lines, as upstream has them.
+        let (lang, client_strings) = if lines.is_empty() || stats::mistranslated(lines) {
+            matchers = stats::block_matchers_indexed(block.lang("English").unwrap_or_default(), ov);
+            ("English", &self.en_client_strings)
+        } else {
+            (self.lang, &self.client_strings)
+        };
+        stats::add_advanced(&mut matchers, &self.desc, block, lang);
+        serde_json::to_value(c.conditioned(matchers.into_iter().map(|(_, m)| m).collect(), client_strings)).unwrap()
     }
 
     /// A stats.ndjson entry (the fields generated so far) named `ref_`.
@@ -175,7 +189,7 @@ fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
         }
         let ids = c.trade_ids(&o.desc);
         // Keyed by block: upstream's hand edits also apply to its presence twins.
-        let ov = ovs.get(&overrides::key(&o.desc.blocks[c.block()].ids));
+        let ov = overrides::get(&ovs, &o.desc.blocks[c.block()].ids, code);
         let stat = o.stat(*h, c, ov, s["ref"].as_str().unwrap());
         let theirs = generated_fields(s);
         if stat == theirs {
@@ -205,12 +219,12 @@ fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
         .iter()
         .filter(|(h, _)| !up_hashes.contains(h))
         .map(|(h, c)| {
-            let mods: Vec<String> = c.mods.iter().map(|&(m, _)| format!("d{} g{}", o.mods[m].domain.unwrap_or(0), o.mods[m].generation_type.unwrap_or(0))).collect();
-            serde_json::json!({ "ids": o.desc.blocks[c.blocks[0]].ids, "text": o.trade.ref_text(*h), "mods": mods, "first_mod": o.mods[c.mods[0].0].id })
+            let mods: Vec<String> = c.mods.iter().map(|&(m, _)| format!("{} d{} g{}", o.mods[m].id, o.mods[m].domain.unwrap_or(0), o.mods[m].generation_type.unwrap_or(0))).collect();
+            serde_json::json!({ "ids": o.desc.blocks[c.blocks[0]].ids, "text": o.trade.ref_text(*h), "mods": mods })
         })
         .collect();
     let keys: HashSet<String> = o.collected.values().map(|c| overrides::key(&o.desc.blocks[c.block()].ids)).collect();
-    let stale: Vec<&String> = ovs.keys().filter(|k| !keys.contains(*k)).collect();
+    let stale: Vec<&String> = ovs.keys().filter(|k| !keys.contains(overrides::block_of(k))).collect();
     println!(
         "upstream hash stats {}, generated {}, covered {covered}, matchers exact {exact} ({:.1}%), stats exact {stat_exact}, ref = site text {ref_rule}, extra {}, overrides {} ({} stale)",
         o.upstream.len(),
@@ -237,7 +251,7 @@ fn derive(o: &Oracle, c: &stats::Collected, theirs: &Value) -> Option<overrides:
     for b in blocks {
         let lines = o.desc.blocks[b].lang(o.lang)?;
         // Upstream's matchers as line indexes (first line with that text).
-        let wrap = |t: String| c.conditioned(vec![stats::Matcher { string: t, negate: false, value: None }], &o.client_strings).remove(0).string;
+        let wrap = |t: String| c.conditioned(vec![stats::Matcher { string: t, negate: false, value: None, advanced: None }], &o.client_strings).remove(0).string;
         let Some(idx) = wanted.iter().map(|(s, _)| lines.iter().position(|v| wrap(stats::line_string(v)) == *s)).collect::<Option<Vec<usize>>>() else { continue };
         let mut ov = overrides::Override { file: (b != default).then(|| o.desc.block_file[b].clone()), ..Default::default() };
         let all = stats::block_matchers_indexed(lines, None);
@@ -316,13 +330,40 @@ fn derive_overrides(cache: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `items::extra_items` of every language, to extra/<lang>/items.ndjson.
+fn extra_items(cache: &Path) -> Result<(), String> {
+    let tables = |lang: &str, t: &str| cache.join("tables").join(lang).join(format!("{t}.json"));
+    let english: Vec<items::BaseItem> = read_json(&tables("English", "BaseItemTypes"))?;
+    let classes: Vec<items::ItemClass> = read_json(&tables("English", "ItemClasses"))?;
+    for (code, lang) in LANGUAGES {
+        let path = upstream_dir().join(code).join("items.ndjson");
+        let upstream = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut existing = std::collections::HashSet::new();
+        for line in upstream.lines().filter(|l| !l.is_empty()) {
+            let v: Value = serde_json::from_str(line).map_err(|e| format!("{}: {e}", path.display()))?;
+            if v["namespace"] == "ITEM" {
+                existing.extend(v["refName"].as_str().map(String::from));
+            }
+        }
+        let names: Vec<items::BaseItem> = read_json(&tables(lang, "BaseItemTypes"))?;
+        let entries = items::extra_items(&english, &names, &classes, &existing)?;
+        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("extra").join(code);
+        std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+        let text: String = entries.iter().map(|e| e.to_string() + "\n").collect();
+        std::fs::write(out.join("items.ndjson"), text).map_err(|e| format!("{}: {e}", out.display()))?;
+        println!("{code}: {} items", entries.len());
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["compare", cache] => compare(Path::new(cache), "en").map(drop),
         ["compare", cache, lang] => compare(Path::new(cache), lang).map(drop),
         ["derive-overrides", cache] => derive_overrides(Path::new(cache)),
-        _ => Err("usage: poe1-data compare <cache/patch dir> [lang] | derive-overrides <cache/patch dir>".into()),
+        ["extra-items", cache] => extra_items(Path::new(cache)),
+        _ => Err("usage: poe1-data compare <cache/patch dir> [lang] | derive-overrides <cache/patch dir> | extra-items <cache/patch dir>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -337,7 +378,8 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    /// Every stat we generate that upstream has must match it exactly. Needs
+    /// Every stat we generate that upstream has must match it exactly, in
+    /// every language. Needs
     /// cache/<ORACLE_PATCH> (export.mjs); skipped without it.
     #[test]
     fn oracle_matches_upstream() {
@@ -346,9 +388,11 @@ mod tests {
             eprintln!("skipped: no {} (node export.mjs {ORACLE_PATCH})", cache.display());
             return;
         }
-        let differ = compare(&cache, "en").unwrap();
-        let unexplained: Vec<&String> = differ.iter().filter(|r| !ORACLE_NOISE.iter().any(|(n, _)| n == r)).collect();
-        assert!(unexplained.is_empty(), "differ from upstream (see {}/compare-en.json): {unexplained:?}", cache.display());
+        for (code, _) in LANGUAGES {
+            let differ = compare(&cache, code).unwrap();
+            let unexplained: Vec<&String> = differ.iter().filter(|r| !ORACLE_NOISE.iter().any(|(n, _)| n == r)).collect();
+            assert!(unexplained.is_empty(), "{code} differs from upstream (see {}/compare-{code}.json): {unexplained:?}", cache.display());
+        }
     }
 }
 

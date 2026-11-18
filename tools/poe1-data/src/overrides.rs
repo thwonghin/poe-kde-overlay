@@ -7,6 +7,8 @@
 //! (upstream edits those alike), and applies to every language: the translations of a
 //! block have the same lines, with the same conditions, in the same order.
 //! Lines are named by their index in the block (file order, from 0).
+//! Where upstream treats a language apart (a value only English has),
+//! `<ids>@<lang code>` replaces the entry for that language.
 //!
 //! `derive-overrides` writes the entries from upstream's data and checks
 //! each reproduces it; an entry whose block no longer exists is reported.
@@ -44,6 +46,17 @@ pub fn key(ids: &[String]) -> String {
     ids.join(" ")
 }
 
+/// The entry for `ids` in language `code` (renderer code: "en", "ko").
+pub fn get<'a>(overrides: &'a Overrides, ids: &[String], code: &str) -> Option<&'a Override> {
+    let key = key(ids);
+    overrides.get(&format!("{key}@{code}")).or_else(|| overrides.get(&key))
+}
+
+/// The block key of an entry's key ("a b@ko" -> "a b").
+pub fn block_of(key: &str) -> &str {
+    key.split_once('@').map_or(key, |(k, _)| k)
+}
+
 pub fn load(path: &Path) -> Result<Overrides, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
@@ -55,4 +68,20 @@ pub fn load(path: &Path) -> Result<Overrides, String> {
 pub fn save(path: &Path, overrides: &Overrides) -> Result<(), String> {
     let text = serde_json::to_string_pretty(overrides).unwrap() + "\n";
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_entry_replaces_the_shared_one() {
+        let ov = |why: &str| Override { why: why.into(), ..Default::default() };
+        let ovs = Overrides::from([("a b".into(), ov("all")), ("a b@ko".into(), ov("ko"))]);
+        let ids = ["a".to_string(), "b".to_string()];
+        assert_eq!(get(&ovs, &ids, "ko").unwrap().why, "ko");
+        assert_eq!(get(&ovs, &ids, "en").unwrap().why, "all");
+        assert_eq!(get(&ovs, &ids[..1], "ko"), None);
+        assert_eq!(block_of("a b@ko"), "a b");
+    }
 }

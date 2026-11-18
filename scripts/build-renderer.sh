@@ -17,3 +17,21 @@ for vendor in awakened-poe-trade exiled-exchange-2; do
   )
   echo "renderer built at vendor/$vendor/renderer/dist/"
 done
+
+# poe1: base types upstream's data doesn't have yet (tools/poe1-data/extra,
+# `poe1-data extra-items`), appended to the built data. The lookups over it
+# (*.index.bin, string offsets) are rebuilt by upstream's own, unmodified
+# make-index-files.mjs, run from a scratch tree where its ../../public/data
+# is the built data.
+renderer="$(realpath "$root/vendor/awakened-poe-trade/renderer")"
+for extra in "$root"/tools/poe1-data/extra/*/items.ndjson; do
+  cat "$extra" >> "$renderer/dist/data/$(basename "$(dirname "$extra")")/items.ndjson"
+done
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+mkdir -p "$scratch/src/assets" "$scratch/public"
+cp "$renderer/src/assets/make-index-files.mjs" "$scratch/src/assets/"
+ln -s "$renderer/dist/data" "$scratch/public/data"
+ln -s "$renderer/node_modules" "$scratch/node_modules"
+node "$scratch/src/assets/make-index-files.mjs"
+echo "poe1 extra items added"

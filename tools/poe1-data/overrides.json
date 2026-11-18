@@ -3,12 +3,6 @@
     "why": "which way is better is semantic",
     "better": 1
   },
-  "add_frenzy_charge_on_critical_strike": {
-    "why": "upstream sets the value by hand",
-    "value": {
-      "0": 1.0
-    }
-  },
   "base_chance_to_freeze_% always_freeze": {
     "why": "upstream drops lines no rule explains",
     "keep": [
@@ -347,14 +341,6 @@
     "why": "which way is better is semantic",
     "better": -1
   },
-  "spell_minimum_added_cold_damage_per_power_charge spell_maximum_added_cold_damage_per_power_charge": {
-    "why": "upstream's order follows no rule",
-    "order": [
-      0,
-      2,
-      1
-    ]
-  },
   "trigger_socketed_spell_on_skill_use_%": {
     "why": "upstream drops lines no rule explains",
     "keep": [
@@ -380,5 +366,56 @@
     "keep": [
       0
     ]
+  },
+  "spell_minimum_added_cold_damage_per_power_charge spell_maximum_added_cold_damage_per_power_charge@ru": {
+    "why": "upstream's Russian order is the file's, not by text",
+    "order": [
+      0,
+      1,
+      2
+    ]
+  },
+  "arrows_pierce_additional_target@cmn-Hant": {
+    "why": "upstream sets the value by hand, in Chinese only",
+    "value": {
+      "0": 1
+    }
+  },
+  "physical_damage_reduction_rating_%_while_not_moving@ru": {
+    "why": "upstream's Russian order is English's, not by text",
+    "order": [
+      1,
+      0
+    ]
+  },
+  "mana_regeneration_rate_+%_while_stationary@cmn-Hant": {
+    "why": "upstream's Chinese order is English's, not by text",
+    "order": [
+      0,
+      1
+    ]
+  },
+  "add_frenzy_charge_on_critical_strike": {
+    "why": "upstream sets the value by hand (English, Korean)",
+    "value": {
+      "0": 1
+    }
+  },
+  "add_frenzy_charge_on_critical_strike@ru": {
+    "why": "upstream sets no value in Russian, as the rules"
+  },
+  "add_frenzy_charge_on_critical_strike@cmn-Hant": {
+    "why": "upstream sets no value in Chinese, as the rules"
+  },
+  "spell_minimum_added_cold_damage_per_power_charge spell_maximum_added_cold_damage_per_power_charge": {
+    "why": "upstream's order follows no rule (English, Chinese)",
+    "order": [
+      0,
+      2,
+      1
+    ]
+  },
+  "spell_minimum_added_cold_damage_per_power_charge spell_maximum_added_cold_damage_per_power_charge@ko": {
+    "why": "upstream's Korean order is by text, as the rules"
   }
 }

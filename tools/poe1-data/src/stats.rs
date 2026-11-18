@@ -120,6 +120,9 @@ impl Descriptions {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Matcher {
     pub string: String,
+    /// The advanced (Ctrl+Alt) description's wording, where it differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub negate: bool,
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "number")]
@@ -212,11 +215,49 @@ pub fn block_matchers(variants: &[Variant], ov: Option<&Override>) -> Vec<Matche
     block_matchers_indexed(variants, ov).into_iter().map(|(_, m)| m).collect()
 }
 
+/// Sets `advanced` from advanced_mod_stat_descriptions, which rewords a few
+/// blocks for the Ctrl+Alt item text: per line, the advanced line with the
+/// same conditions, where its wording differs (a block it restructures,
+/// "Non-Aura Hexes expire...", has none).
+pub fn add_advanced(matchers: &mut [(usize, Matcher)], desc: &Descriptions, block: &Block, lang: &str) {
+    const FILE: &str = "advanced_mod_stat_descriptions";
+    let Some(adv) = block.ids.first().and_then(|id| desc.lookup(FILE, id)).filter(|&b| desc.block_file[b] == FILE) else { return };
+    let (Some(lines), Some(ours)) = (desc.blocks[adv].lang(lang), block.lang(lang)) else { return };
+    for (i, m) in matchers {
+        let same = lines.iter().find(|l| l.conds == ours[*i].conds);
+        if let Some(text) = same.map(line_string).filter(|t| *t != m.string) {
+            m.advanced = Some(text);
+        }
+    }
+}
+
+/// Two lines worded alike that show different stats ("Recover {0} Life",
+/// "Recover {1} Life"): the reader can't tell which. (Alike lines of the same
+/// stats are a plural the language doesn't have, and are one matcher.)
+pub fn mistranslated(lines: &[Variant]) -> bool {
+    let shown = |t: &str| t.match_indices('{').filter_map(|(i, _)| t[i + 1..].chars().next().filter(char::is_ascii_digit)).collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(i, a)| lines[i + 1..].iter().any(|b| line_string(a) == line_string(b) && shown(&a.text) != shown(&b.text)))
+}
+
 /// The text a line is matched by. The renderer reads a value with its sign
 /// ("-5 to X" is # = -5), so "+#"/"-#" lines are just "#" (and "-{0} to
 /// Evasion" is a duplicate of "+{0} to Evasion").
 pub fn line_string(v: &Variant) -> String {
-    matcher_text(&v.text).replace("+#", "#").replace("-#", "#")
+    unsigned(&matcher_text(&v.text))
+}
+
+/// Drops one sign before each "#", but not a range's dash ("#-#", Korean
+/// "{0}-{1}"): "+{0:+d}" is "+#" (Chinese spells the sign out).
+fn unsigned(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '+' | '-') && chars.peek() == Some(&'#') && !out.ends_with('#') {
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// `block_matchers`, each with the index of the line it comes from (the
@@ -228,7 +269,7 @@ pub fn block_matchers_indexed(variants: &[Variant], ov: Option<&Override>) -> Ve
         if out.iter().any(|(_, m)| m.string == string) || ov.and_then(|o| o.keep.as_ref()).is_some_and(|keep| !keep.contains(&i)) {
             continue;
         }
-        let mut m = Matcher { string, negate: false, value: None };
+        let mut m = Matcher { string, negate: false, value: None, advanced: None };
         if let Some(value) = Some(()).filter(|_| !m.string.contains('#')).and_then(|_| fixed_value(v, variants)) {
             m.value = Some(value);
         } else if v.has_flag("negate") {
@@ -460,7 +501,7 @@ mod tests {
     fn presence_condition_wraps_lines() {
         let c = Collected { blocks: vec![0], mods: vec![(0, 0)], condition: Some(CONDITIONS[0]), weighted: None };
         let cs: HashMap<String, String> = [("InfluenceStatConditionPresenceUniqueMonster".to_string(), "While a Unique Enemy is in your Presence, {0}".to_string())].into();
-        let got = c.conditioned(vec![Matcher { string: "#% chance to Freeze".into(), negate: false, value: None }], &cs);
+        let got = c.conditioned(vec![Matcher { string: "#% chance to Freeze".into(), negate: false, value: None, advanced: None }], &cs);
         assert_eq!(got[0].string, "While a Unique Enemy is in your Presence, #% chance to Freeze");
     }
 
@@ -481,9 +522,9 @@ mod tests {
     #[test]
     fn matcher_json_matches_upstream_shape() {
         let json = |m: Matcher| serde_json::to_string(&m).unwrap();
-        assert_eq!(json(Matcher { string: "a".into(), negate: false, value: Some(100.0) }), r#"{"string":"a","value":100}"#);
-        assert_eq!(json(Matcher { string: "a".into(), negate: false, value: Some(1.5) }), r#"{"string":"a","value":1.5}"#);
-        assert_eq!(json(Matcher { string: "a".into(), negate: true, value: None }), r#"{"string":"a","negate":true}"#);
+        assert_eq!(json(Matcher { string: "a".into(), negate: false, value: Some(100.0), advanced: None }), r#"{"string":"a","value":100}"#);
+        assert_eq!(json(Matcher { string: "a".into(), negate: false, value: Some(1.5), advanced: None }), r#"{"string":"a","value":1.5}"#);
+        assert_eq!(json(Matcher { string: "a".into(), negate: true, value: None, advanced: None }), r#"{"string":"a","negate":true}"#);
     }
 
     #[test]
@@ -501,6 +542,40 @@ mod tests {
         d.add("graft_stat_descriptions", "description\n1 a\n1\n# \"first\"\ndescription\n1 a\n1\n# \"second\"").unwrap();
         let block = d.lookup("graft_stat_descriptions", "a").unwrap();
         assert_eq!(d.blocks[block].lang("English").unwrap()[0].text, "second");
+    }
+
+    #[test]
+    fn mistranslated_when_alike_lines_show_other_stats() {
+        let line = |t: &str| descriptions::parse(&format!("description\n1 a\n1\n# \"{t}\"")).unwrap().remove(0).langs.remove(0).1.remove(0);
+        assert!(mistranslated(&[line("恢復{0}生命"), line("恢復{1}生命")]));
+        assert!(!mistranslated(&[line("최대 {0:+d}개"), line("최대 {0:+d}개")]));
+        assert!(!mistranslated(&[line("恢復{0}生命"), line("恢復{1}魔力")]));
+    }
+
+    #[test]
+    fn one_sign_dropped_but_not_a_range() {
+        assert_eq!(unsigned("+# to Evasion"), "# to Evasion");
+        assert_eq!(unsigned("-# to Evasion"), "# to Evasion");
+        assert_eq!(unsigned("++#最大"), "+#最大");
+        assert_eq!(unsigned("피해 #-# 추가"), "피해 #-# 추가");
+    }
+
+    #[test]
+    fn advanced_wording_where_it_differs() {
+        let mut d = Descriptions { blocks: vec![], block_file: vec![], files: HashMap::new() };
+        d.add("stat_descriptions", "description\n1 a\n2\n1|# \"{0}% more\"\n#|-1 \"{0}% less\" negate 1\ndescription\n1 b\n1\n# \"{0} b\"").unwrap();
+        d.add("advanced_mod_stat_descriptions", "include \"stat_descriptions.csd\"\ndescription\n1 a\n2\n1|# \"{0}% more\"\n#|-1 \"{0}% fewer\" negate 1").unwrap();
+        let advanced = |d: &Descriptions, b: usize| {
+            let mut m = block_matchers_indexed(d.blocks[b].lang("English").unwrap(), None);
+            add_advanced(&mut m, d, &d.blocks[b], "English");
+            m.into_iter().map(|(_, m)| m.advanced).collect::<Vec<_>>()
+        };
+        assert_eq!(advanced(&d, 0), [None, Some("#% fewer".into())]);
+        // Not reworded: found only through the include.
+        assert_eq!(advanced(&d, 1), [None]);
+        // Restructured: no line with the same conditions.
+        d.add("advanced_mod_stat_descriptions", "description\n1 a\n1\n# \"{0}% changed\"").unwrap();
+        assert_eq!(advanced(&d, 0), [None, None]);
     }
 
     #[test]
