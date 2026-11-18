@@ -308,10 +308,6 @@
       0
     ]
   },
-  "map_num_extra_harbingers": {
-    "why": "upstream uses another mod's wording",
-    "file": "stat_descriptions"
-  },
   "map_pack_size_+% chart_pack_size_voyage_display_stat": {
     "why": "upstream uses another mod's wording",
     "file": "atlas_stat_descriptions"

@@ -280,6 +280,8 @@ pub struct Collected {
     pub mods: Vec<(usize, usize)>,
     /// (condition stat id, ClientStrings id of its template), see CONDITIONS.
     pub condition: Option<(&'static str, &'static str)>,
+    /// The block of the last mod with spawn weight, if any.
+    pub weighted: Option<usize>,
 }
 
 impl Collected {
@@ -304,9 +306,11 @@ impl Collected {
 impl Collected {
     /// The wording upstream uses: the last mod's (in table order) — as if
     /// each mod overwrote the stat (Idol "in your Maps" over a map mod's "in
-    /// Area"). The 3.29 exceptions are in overrides.json.
+    /// Area") — of those with spawn weight, if any (3.30's unweighted
+    /// "RandomJuiceMod" map mods, after the Idols, don't take it). The
+    /// exceptions are in overrides.json.
     pub fn block(&self) -> usize {
-        self.mods.last().expect("collected with a mod").1
+        self.weighted.unwrap_or_else(|| self.mods.last().expect("collected with a mod").1)
     }
 
     /// `block`, unless an override names the file whose wording to use.
@@ -337,6 +341,9 @@ pub fn collect(mods: &[Mod], stats: &[Stat], desc: &Descriptions) -> BTreeMap<u3
                 entry.blocks.push(block);
             }
             entry.mods.push((mod_idx, block));
+            if m.spawn_weights.iter().any(|&w| w > 0) {
+                entry.weighted = Some(block);
+            }
         }
     }
     by_hash
@@ -443,7 +450,7 @@ mod tests {
         let mut d = Descriptions { blocks: vec![], block_file: vec![], files: HashMap::new() };
         d.add("stat_descriptions", "description\n1 a\n1\n# \"#% Flask Charges gained\"").unwrap();
         d.add("heist_equipment_stat_descriptions", "description\n1 a\n1\n# \"Players have #% Flask Charges gained\"").unwrap();
-        let c = Collected { blocks: vec![1, 0], mods: vec![(0, 1), (1, 0)], condition: None };
+        let c = Collected { blocks: vec![1, 0], mods: vec![(0, 1), (1, 0)], condition: None, weighted: None };
         assert_eq!(c.chosen_block(&d, None), 0); // last mod's
         let ov = Override { file: Some("heist_equipment_stat_descriptions".into()), ..Default::default() };
         assert_eq!(c.chosen_block(&d, Some(&ov)), 1);
@@ -451,7 +458,7 @@ mod tests {
 
     #[test]
     fn presence_condition_wraps_lines() {
-        let c = Collected { blocks: vec![0], mods: vec![(0, 0)], condition: Some(CONDITIONS[0]) };
+        let c = Collected { blocks: vec![0], mods: vec![(0, 0)], condition: Some(CONDITIONS[0]), weighted: None };
         let cs: HashMap<String, String> = [("InfluenceStatConditionPresenceUniqueMonster".to_string(), "While a Unique Enemy is in your Presence, {0}".to_string())].into();
         let got = c.conditioned(vec![Matcher { string: "#% chance to Freeze".into(), negate: false, value: None }], &cs);
         assert_eq!(got[0].string, "While a Unique Enemy is in your Presence, #% chance to Freeze");
@@ -525,8 +532,11 @@ mod tests {
         // A mod without spawn weight is read only if a prefix/suffix/unique/
         // blight tower mod (here CORRUPTED 5 isn't, PREFIX 1 is), nor is a
         // domain upstream leaves out (ATLAS passives, 11).
-        assert_eq!(text(&[m(5, 100), mg(37, 0, 5)]), "{0}% more in Area");
-        assert_eq!(text(&[m(5, 100), mg(37, 0, 1)]), "{0}% more in your Maps");
+        assert_eq!(text(&[mg(5, 0, 1), mg(37, 0, 5)]), "{0}% more in Area");
+        assert_eq!(text(&[mg(5, 0, 1), mg(37, 0, 1)]), "{0}% more in your Maps");
         assert_eq!(text(&[m(5, 100), m(11, 100)]), "{0}% more in Area");
+        // A weighted mod's wording beats a later unweighted one's.
+        assert_eq!(text(&[m(37, 100), mg(5, 0, 3)]), "{0}% more in your Maps");
+        assert_eq!(text(&[mg(37, 0, 3), mg(5, 0, 3)]), "{0}% more in Area");
     }
 }

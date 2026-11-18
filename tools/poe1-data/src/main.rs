@@ -28,8 +28,11 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Upstream's committed data; UPSTREAM_DATA points at another copy (e.g. a
+/// past league's, `git -C vendor/awakened-poe-trade archive <rev>`).
 fn upstream_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/awakened-poe-trade/renderer/public/data")
+    std::env::var_os("UPSTREAM_DATA").map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/awakened-poe-trade/renderer/public/data"))
 }
 
 /// The numeric hash of a `<type>.stat_<n>` trade id.
@@ -135,11 +138,22 @@ fn generated_fields(s: &Value) -> Value {
     Value::Object(out)
 }
 
+/// The patch upstream's vendored data was generated from: the latest
+/// (github.com/poe-tool-dev/latest-patch-version) when it was committed.
+/// Bump it with the vendor: `node export.mjs <patch>`. A patch the CDN has
+/// lost bundles of needs oracle.mjs instead (as 3.29.3.3 did).
+#[cfg(test)]
+const ORACLE_PATCH: &str = "3.30.0.2.2";
+
 /// Stats the oracle can't reproduce for a reason outside the generator.
-const ORACLE_NOISE: &[(&str, &str)] = &[(
-    "#% chance to gain a Brine Charge instead of an Endurance Charge",
-    "unknown to RePoE's 3.29.3.3 export, so its trade types come from the 3.30 site, which added implicit",
-)];
+const ORACLE_NOISE: &[(&str, &str)] = &[
+    // The trade site's list is live: it gained these types after upstream
+    // fetched it (the 3.30.0.1.3 export's list has neither).
+    ("#% increased Attack Speed if you've changed Stance Recently", "site added implicit"),
+    ("Arrows Fork", "site added implicit"),
+    ("Adds # to # Fire Damage to Attacks per 10 Strength", "site added implicit"),
+    ("You are affected by Delirium Fog", "site added fractured"),
+];
 
 /// Returns the refs of covered stats that differ from upstream.
 fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
@@ -324,18 +338,17 @@ mod tests {
     use super::*;
 
     /// Every stat we generate that upstream has must match it exactly. Needs
-    /// cache/oracle (export.mjs both patches, then oracle.mjs); skipped
-    /// without it.
+    /// cache/<ORACLE_PATCH> (export.mjs); skipped without it.
     #[test]
     fn oracle_matches_upstream() {
-        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("cache/oracle");
+        let cache = Path::new(env!("CARGO_MANIFEST_DIR")).join("cache").join(ORACLE_PATCH);
         if !cache.join("files").is_dir() {
-            eprintln!("skipped: no {} (see oracle.mjs)", cache.display());
+            eprintln!("skipped: no {} (node export.mjs {ORACLE_PATCH})", cache.display());
             return;
         }
         let differ = compare(&cache, "en").unwrap();
         let unexplained: Vec<&String> = differ.iter().filter(|r| !ORACLE_NOISE.iter().any(|(n, _)| n == r)).collect();
-        assert!(unexplained.is_empty(), "differ from upstream (see cache/oracle/compare-en.json): {unexplained:?}");
+        assert!(unexplained.is_empty(), "differ from upstream (see {}/compare-en.json): {unexplained:?}", cache.display());
     }
 }
 
