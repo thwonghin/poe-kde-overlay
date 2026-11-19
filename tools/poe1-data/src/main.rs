@@ -6,11 +6,8 @@
 //!   cargo run --release -- derive-overrides <cache/patch dir>
 //!       add overrides.json entries for stats no rule reproduces, each
 //!       checked to reproduce upstream; lists what can't be expressed
-//!   cargo run --release -- extra-items <cache/patch dir>
-//!       write extra/<lang>/items.ndjson: base types upstream lacks (items)
 
 mod descriptions;
-mod items;
 mod murmur;
 mod overrides;
 mod stats;
@@ -330,40 +327,13 @@ fn derive_overrides(cache: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `items::extra_items` of every language, to extra/<lang>/items.ndjson.
-fn extra_items(cache: &Path) -> Result<(), String> {
-    let tables = |lang: &str, t: &str| cache.join("tables").join(lang).join(format!("{t}.json"));
-    let english: Vec<items::BaseItem> = read_json(&tables("English", "BaseItemTypes"))?;
-    let classes: Vec<items::ItemClass> = read_json(&tables("English", "ItemClasses"))?;
-    for (code, lang) in LANGUAGES {
-        let path = upstream_dir().join(code).join("items.ndjson");
-        let upstream = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut existing = std::collections::HashSet::new();
-        for line in upstream.lines().filter(|l| !l.is_empty()) {
-            let v: Value = serde_json::from_str(line).map_err(|e| format!("{}: {e}", path.display()))?;
-            if v["namespace"] == "ITEM" {
-                existing.extend(v["refName"].as_str().map(String::from));
-            }
-        }
-        let names: Vec<items::BaseItem> = read_json(&tables(lang, "BaseItemTypes"))?;
-        let entries = items::extra_items(&english, &names, &classes, &existing)?;
-        let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("extra").join(code);
-        std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
-        let text: String = entries.iter().map(|e| e.to_string() + "\n").collect();
-        std::fs::write(out.join("items.ndjson"), text).map_err(|e| format!("{}: {e}", out.display()))?;
-        println!("{code}: {} items", entries.len());
-    }
-    Ok(())
-}
-
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["compare", cache] => compare(Path::new(cache), "en").map(drop),
         ["compare", cache, lang] => compare(Path::new(cache), lang).map(drop),
         ["derive-overrides", cache] => derive_overrides(Path::new(cache)),
-        ["extra-items", cache] => extra_items(Path::new(cache)),
-        _ => Err("usage: poe1-data compare <cache/patch dir> [lang] | derive-overrides <cache/patch dir> | extra-items <cache/patch dir>".into()),
+        _ => Err("usage: poe1-data compare <cache/patch dir> [lang] | derive-overrides <cache/patch dir>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

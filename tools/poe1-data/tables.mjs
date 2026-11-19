@@ -20,8 +20,5 @@ export const TABLES = [
   { name: 'Stats', columns: ['Id', 'IsLocal', 'IsWeaponLocal'] },
   { name: 'ModFamily', columns: ['Id'] },
   // UI text the client adds to stat lines (Eldritch "presence" prefixes).
-  { name: 'ClientStrings', columns: ['Id', 'Text'] },
-  // Base types the renderer's items.ndjson lacks (3.30's Viscera).
-  { name: 'BaseItemTypes', columns: ['Id', 'ItemClassesKey', 'Name'] },
-  { name: 'ItemClasses', columns: ['Id', 'Name'] }
+  { name: 'ClientStrings', columns: ['Id', 'Text'] }
 ]
