@@ -1,6 +1,6 @@
 # Maintainer: Hin Wong <fraywong@gmail.com>
 pkgname=poe-kde-overlay
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Native KWin/Wayland backend for Awakened PoE Trade (PoE1) and Exiled Exchange 2 (PoE2)"
 arch=('x86_64')
@@ -13,7 +13,9 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd "$pkgname"
-  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  # Cargo.toml's version, plus the commit so every push is an upgrade.
+  printf "%s.r%s.%s" "$(sed -n 's/^version = "\(.*\)"/\1/p;T;q' Cargo.toml)" \
+    "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {
