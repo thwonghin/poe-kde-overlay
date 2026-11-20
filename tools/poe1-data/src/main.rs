@@ -50,8 +50,8 @@ struct Oracle {
     mods: Vec<stats::Mod>,
     desc: stats::Descriptions,
     collected: std::collections::BTreeMap<u32, stats::Collected>,
-    /// Upstream's stats by trade stat hash.
-    upstream: HashMap<u32, Value>,
+    /// Upstream's stats by trade stat hash, in its order (see `theirs`).
+    upstream: HashMap<u32, Vec<Value>>,
     /// The language's ClientStrings, by id, and English ones.
     client_strings: HashMap<String, String>,
     en_client_strings: HashMap<String, String>,
@@ -78,14 +78,14 @@ impl Oracle {
 
         let path = upstream_dir().join(code).join("stats.ndjson");
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut upstream: HashMap<u32, Value> = HashMap::new();
+        let mut upstream: HashMap<u32, Vec<Value>> = HashMap::new();
         for line in text.lines().filter(|l| !l.is_empty()) {
             let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
             let group = v.get("stats").and_then(Value::as_array).cloned().unwrap_or_else(|| vec![v]);
             for s in group {
-                let ids: Vec<u32> = s["trade"]["ids"].as_object().into_iter().flatten().flat_map(|(_, ids)| ids.as_array().into_iter().flatten()).filter_map(|id| id.as_str().and_then(stat_hash)).collect();
+                let ids: HashSet<u32> = s["trade"]["ids"].as_object().into_iter().flatten().flat_map(|(_, ids)| ids.as_array().into_iter().flatten()).filter_map(|id| id.as_str().and_then(stat_hash)).collect();
                 for h in ids {
-                    upstream.insert(h, s.clone());
+                    upstream.entry(h).or_default().push(s.clone());
                 }
             }
         }
@@ -131,6 +131,14 @@ impl Oracle {
     }
 }
 
+/// Upstream's entry for a hash to compare with. 27 hashes have two (an
+/// item's wording and a map mod's, `fromAreaMods`; or a "Global" twin) and
+/// we generate one: the one whose matchers are `ours`, else the last. Not
+/// by position alone: upstream re-sorts the file between versions.
+fn theirs<'a>(entries: &'a [Value], ours: &Value) -> &'a Value {
+    entries.iter().find(|s| s["matchers"] == *ours).unwrap_or_else(|| entries.last().unwrap())
+}
+
 /// The fields of an upstream stat the generator makes so far.
 fn generated_fields(s: &Value) -> Value {
     let mut out = serde_json::Map::new();
@@ -154,16 +162,21 @@ fn generated_fields(s: &Value) -> Value {
 /// Bump it with the vendor: `node export.mjs <patch>`. A patch the CDN has
 /// lost bundles of needs oracle.mjs instead (as 3.29.3.3 did).
 #[cfg(test)]
-const ORACLE_PATCH: &str = "3.30.0.2.2";
+const ORACLE_PATCH: &str = "3.30.0.3";
 
 /// Stats the oracle can't reproduce for a reason outside the generator.
 const ORACLE_NOISE: &[(&str, &str)] = &[
     // The trade site's list is live: it gained these types after upstream
-    // fetched it (the 3.30.0.1.3 export's list has neither).
-    ("#% increased Attack Speed if you've changed Stance Recently", "site added implicit"),
-    ("Arrows Fork", "site added implicit"),
-    ("Adds # to # Fire Damage to Attacks per 10 Strength", "site added implicit"),
-    ("You are affected by Delirium Fog", "site added fractured"),
+    // fetched it (matchers equal; ours only has the extra type).
+    ("# Maximum Void Charges", "site added implicit"),
+    ("#% increased Unarmed Attack Speed with Melee Skills", "site added fractured"),
+    ("Attacks with Axes or Swords grant # Rage on Hit", "site added fractured"),
+    ("Consumes a Void Charge to Trigger Level # Void Shot when you fire Arrows with a Non-Triggered Skill", "site added implicit"),
+    ("Gain Added Spell Damage equal to #% of Damage of Equipped Dagger\nIf two Daggers are Equipped, each contributes 60% as much Added Damage", "site added fractured"),
+    ("Gain Added Spell Damage equal to #% of Damage of Equipped Wand\nIf two Wands are Equipped, each contributes half as much Added Damage", "site added fractured"),
+    ("Gain a Void Charge every # seconds", "site added implicit"),
+    ("Minions convert #% of Physical Damage to Cold Damage", "site added fractured"),
+    ("Minions convert #% of Physical Damage to Fire Damage", "site added fractured"),
 ];
 
 /// Returns the refs of covered stats that differ from upstream.
@@ -172,12 +185,16 @@ fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
     let ovs = overrides::load(&overrides_path())?;
     let (mut covered, mut exact, mut stat_exact, mut ref_rule) = (0, 0, 0, 0);
     let (mut miss, mut diff, mut stat_diff, mut differ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for (h, s) in &o.upstream {
+    for (h, entries) in &o.upstream {
         let Some(c) = o.collected.get(h) else {
-            miss.push(s["ref"].clone());
+            miss.push(entries.last().unwrap()["ref"].clone());
             continue;
         };
         covered += 1;
+        // Keyed by block: upstream's hand edits also apply to its presence twins.
+        let ov = overrides::get(&ovs, &o.desc.blocks[c.block()].ids, code);
+        let ours = o.matchers(c, ov);
+        let s = theirs(entries, &ours);
         // Refs stay as previously named (renderer code and saved filters
         // look them up); a new stat's is the site's text.
         let rule_ref = o.trade.ref_text(*h).unwrap();
@@ -185,9 +202,7 @@ fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
             ref_rule += 1;
         }
         let ids = c.trade_ids(&o.desc);
-        // Keyed by block: upstream's hand edits also apply to its presence twins.
-        let ov = overrides::get(&ovs, &o.desc.blocks[c.block()].ids, code);
-        let stat = o.stat(*h, c, ov, s["ref"].as_str().unwrap());
+        let stat =o.stat(*h, c, ov, s["ref"].as_str().unwrap());
         let theirs = generated_fields(s);
         if stat == theirs {
             stat_exact += 1;
@@ -195,7 +210,6 @@ fn compare(cache: &Path, code: &str) -> Result<Vec<String>, String> {
             differ.push(s["ref"].as_str().unwrap().to_string());
             stat_diff.push(serde_json::json!({ "theirs": theirs, "ours": stat }));
         }
-        let ours = o.matchers(c, ov);
         if ours == s["matchers"] {
             exact += 1;
         } else {
@@ -291,11 +305,13 @@ fn derive_overrides(cache: &Path) -> Result<(), String> {
     let mut ovs = overrides::load(&path)?;
     let mut added = 0;
     let mut inexpressible = Vec::new();
-    for (h, s) in &o.upstream {
+    for (h, entries) in &o.upstream {
         let Some(c) = o.collected.get(h) else { continue };
         let key = overrides::key(&o.desc.blocks[c.block()].ids);
+        let ours = o.matchers(c, ovs.get(&key));
+        let s = theirs(entries, &ours);
         let ref_ = s["ref"].as_str().unwrap();
-        if o.matchers(c, ovs.get(&key)) != s["matchers"] {
+        if ours != s["matchers"] {
             match derive(&o, c, &s["matchers"]) {
                 Some(ov) => {
                     ovs.insert(key.clone(), ov);
